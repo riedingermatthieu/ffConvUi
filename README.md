@@ -23,14 +23,16 @@ development files (tested with FFmpeg 8.1).
 pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja \
                    mingw-w64-x86_64-pkgconf mingw-w64-x86_64-ffmpeg
 export PATH=/c/msys64/mingw64/bin:$PATH
-cmake -S . -B build -G Ninja [-DCONV_TEST_MEDIA=/path/to/file.mkv]
+cmake -S . -B build -G Ninja
 cmake --build build
 cd build && ctest
 ```
 
-With `CONV_TEST_MEDIA` set, the tests also probe that file and convert it end
-to end to MP4, MKV and WebM. The VS Code workspace has an "MSYS2 MINGW64"
-terminal profile (default) with this environment.
+The tests use the synthetic files in [tests/media](tests/media) and the jobs in
+[tests/jobs](tests/jobs); see [tests/README.md](tests/README.md) for what each
+checks and how to regenerate the media. `-DCONV_TEST_MEDIA=/path/to/file`
+runs the probe/end-to-end tests on another file. The VS Code workspace has an
+"MSYS2 MINGW64" terminal profile (default) with this environment.
 
 On Linux/macOS the same commands work with the distribution's FFmpeg `-dev` packages.
 

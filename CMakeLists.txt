@@ -54,8 +54,9 @@ add_test(NAME encoders_video COMMAND convcli encoders --type video --common)
 add_test(NAME filters_video  COMMAND convcli filters --type video)
 add_test(NAME options_scale  COMMAND convcli options filter scale)
 add_test(NAME options_mp4    COMMAND convcli options muxer mp4)
-set(CONV_TEST_MEDIA "" CACHE FILEPATH "Optional media file used by the probe/actions tests")
-if(CONV_TEST_MEDIA)
+set(CONV_TEST_MEDIA "${CMAKE_CURRENT_SOURCE_DIR}/tests/media/test.mkv" CACHE FILEPATH
+    "Media file used by the probe/actions/e2e tests (empty to skip them)")
+if(CONV_TEST_MEDIA AND EXISTS "${CONV_TEST_MEDIA}")
     add_test(NAME probe       COMMAND convcli probe ${CONV_TEST_MEDIA})
     add_test(NAME muxers_for  COMMAND convcli muxers --for ${CONV_TEST_MEDIA} --common)
     add_test(NAME actions_mp4 COMMAND convcli actions ${CONV_TEST_MEDIA} --muxer mp4)
@@ -66,3 +67,20 @@ if(CONV_TEST_MEDIA)
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_job.cmake)
     endforeach()
 endif()
+
+# Job files in tests/jobs use paths relative to the project root
+# (inputs in tests/media, outputs in build/).
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/build")
+file(GLOB CONV_TEST_JOBS "${CMAKE_CURRENT_SOURCE_DIR}/tests/jobs/*.json")
+foreach(job ${CONV_TEST_JOBS})
+    get_filename_component(name "${job}" NAME_WE)
+    if(name MATCHES "^cancel")
+        add_test(NAME job_${name} COMMAND convcli run "${job}" --overwrite --quiet --cancel-after 1
+                 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        # a cancelled run exits with 1; pass on the message instead of the exit code
+        set_tests_properties(job_${name} PROPERTIES PASS_REGULAR_EXPRESSION "Cancelled")
+    else()
+        add_test(NAME job_${name} COMMAND convcli run "${job}" --overwrite --quiet
+                 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    endif()
+endforeach()

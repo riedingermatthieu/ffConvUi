@@ -1,0 +1,18 @@
+{
+  "input": "tests/media/m3_in.mkv",
+  "output": "build/o_mpeg4.avi",
+  "overwrite": true,
+  "streams": [
+    {
+      "input": 0,
+      "action": "transcode",
+      "encoder": "mpeg4",
+      "filters": "scale=640:-2"
+    },
+    {
+      "input": 1,
+      "action": "transcode",
+      "encoder": "libmp3lame"
+    }
+  ]
+}

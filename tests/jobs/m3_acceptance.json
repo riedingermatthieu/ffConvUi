@@ -1,0 +1,50 @@
+{
+  "input": "tests/media/m3_in.mkv",
+  "output": "build/m3_out.mp4",
+  "muxer_options": {
+    "movflags": "+faststart"
+  },
+  "overwrite": true,
+  "metadata": {
+    "title": "M3 acceptance test"
+  },
+  "streams": [
+    {
+      "input": 0,
+      "action": "transcode",
+      "encoder": "libx265",
+      "options": {
+        "crf": 28,
+        "preset": "fast"
+      },
+      "filters": [
+        {
+          "name": "scale",
+          "options": {
+            "w": 1280,
+            "h": -2
+          }
+        },
+        {
+          "name": "fps",
+          "options": {
+            "fps": 25
+          }
+        }
+      ]
+    },
+    {
+      "input": 1,
+      "action": "transcode",
+      "encoder": "aac",
+      "options": {
+        "b": "192k"
+      }
+    },
+    {
+      "input": 2,
+      "action": "transcode",
+      "encoder": "mov_text"
+    }
+  ]
+}

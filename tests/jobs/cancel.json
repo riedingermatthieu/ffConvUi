@@ -1,0 +1,20 @@
+{
+  "input": "tests/media/m3_in.mkv",
+  "output": "build/o_cancel.mp4",
+  "overwrite": true,
+  "streams": [
+    {
+      "input": 0,
+      "action": "transcode",
+      "encoder": "libx264",
+      "options": {
+        "preset": "slow"
+      }
+    },
+    {
+      "input": 1,
+      "action": "transcode",
+      "encoder": "aac"
+    }
+  ]
+}

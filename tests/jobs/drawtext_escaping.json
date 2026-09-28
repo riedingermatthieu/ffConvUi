@@ -1,0 +1,35 @@
+{
+  "input": "tests/media/m3_in.mkv",
+  "output": "build/o_text.mp4",
+  "overwrite": true,
+  "streams": [
+    {
+      "input": 0,
+      "action": "transcode",
+      "encoder": "libx264",
+      "options": {
+        "preset": "ultrafast"
+      },
+      "filters": [
+        {
+          "name": "scale",
+          "options": {
+            "w": 640,
+            "h": -2
+          }
+        },
+        {
+          "name": "drawtext",
+          "options": {
+            "text": "a:b, c [x]; it's 100%",
+            "expansion": "none",
+            "fontsize": 40,
+            "fontcolor": "white",
+            "x": 10,
+            "y": 10
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "input": "tests/media/reschange.ts",
+  "output": "build/o_res.mp4",
+  "overwrite": true,
+  "streams": [
+    {
+      "input": 0,
+      "action": "transcode",
+      "encoder": "libx264",
+      "options": {
+        "preset": "ultrafast"
+      }
+    }
+  ]
+}
