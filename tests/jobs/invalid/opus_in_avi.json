@@ -1,0 +1,1 @@
+{ "_expect": "avi cannot store opus", "input": "tests/media/m3_in.mkv", "output": "build/v.avi", "overwrite": true, "streams": [ { "input": 1, "action": "transcode", "encoder": "libopus" } ] }

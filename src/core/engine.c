@@ -38,6 +38,7 @@
 #include <libavutil/time.h>
 
 #include "caps.h"
+#include "logcap.h"
 
 #define SUB_BUF_SIZE         (1 << 20)
 #define PROGRESS_INTERVAL_US 250000
@@ -85,6 +86,10 @@ typedef struct Engine {
     AVPacket        *pkt;
     int              output_opened;
     int              header_written;
+    int              dry_run;        /* set up everything, write the header to a null sink */
+    int              header_checked; /* dry run: the muxer header was written */
+    LogCapture       cap;            /* FFmpeg log of this thread, for error reasons */
+    int64_t          sink_pos, sink_size;  /* dry-run null sink */
 
     int64_t          t0;
     int64_t          last_progress;
@@ -97,7 +102,8 @@ typedef struct Engine {
 /* ------------------------------------------------------------------------- */
 /* helpers                                                                   */
 
-/* Records the first error only: later failures are usually consequences. */
+/* Records the first error only: later failures are usually consequences.
+ * The first FFmpeg error logged since mark() is appended as the reason. */
 static int fail(Engine *e, int ret, const char *fmt, ...)
 {
     char msg[512];
@@ -111,8 +117,45 @@ static int fail(Engine *e, int ret, const char *fmt, ...)
             snprintf(e->err, e->errlen, "%s: %s", msg, av_err2str(ret));
         else
             snprintf(e->err, e->errlen, "%s", msg);
+        if (e->cap.first[0]) {
+            av_strlcat(e->err, " (", e->errlen);
+            av_strlcat(e->err, e->cap.first, e->errlen);
+            av_strlcat(e->err, ")", e->errlen);
+        }
     }
     return ret < 0 ? ret : AVERROR(EINVAL);
+}
+
+/* Forget earlier log messages before an operation that may fail. */
+static void mark(Engine *e)
+{
+    logcap_clear(&e->cap);
+}
+
+/* Dry-run output: a seekable sink that discards everything (the mp4 muxer
+ * refuses non-seekable outputs, so an in-memory dyn buffer would not do). */
+static int null_write(void *opaque, const uint8_t *buf, int size)
+{
+    Engine *e = opaque;
+
+    e->sink_pos += size;
+    if (e->sink_pos > e->sink_size)
+        e->sink_size = e->sink_pos;
+    return size;
+}
+
+static int64_t null_seek(void *opaque, int64_t offset, int whence)
+{
+    Engine *e = opaque;
+
+    switch (whence & ~AVSEEK_FORCE) {
+    case AVSEEK_SIZE: return e->sink_size;
+    case SEEK_SET:    e->sink_pos = offset;                break;
+    case SEEK_CUR:    e->sink_pos += offset;               break;
+    case SEEK_END:    e->sink_pos = e->sink_size + offset; break;
+    default:          return AVERROR(EINVAL);
+    }
+    return e->sink_pos;
 }
 
 static int cancelled(const Engine *e)
@@ -369,12 +412,15 @@ static int build_graph(Engine *e, OutStream *os, const AVFrame *frame, int exact
     inputs->name        = av_strdup("out");
     inputs->filter_ctx  = sink;
 
+    mark(e);
     if ((ret = avfilter_graph_parse_ptr(graph, desc.str, &inputs, &outputs, NULL)) < 0) {
         ret = fail(e, ret, "stream #%d: invalid filter chain \"%s\"", os->job_index, os->chain);
         goto end;
     }
+    mark(e);
     if ((ret = avfilter_graph_config(graph, NULL)) < 0) {
-        ret = fail(e, ret, "stream #%d: cannot configure filters \"%s\"", os->job_index, desc.str);
+        ret = fail(e, ret, "stream #%d: cannot configure filters \"%s\"", os->job_index,
+                   os->chain[0] ? os->chain : desc.str);
         goto end;
     }
 
@@ -480,6 +526,7 @@ static int try_open_encoder(Engine *e, OutStream *os, AVRational tb, AVRational 
     if (!av_dict_get(opts, "threads", NULL, 0))
         av_dict_set(&opts, "threads", "auto", 0);
 
+    mark(e);
     if ((ret = avcodec_open2(enc, os->encoder, &opts)) < 0)
         goto end;
     if ((left = av_dict_iterate(opts, NULL))) {
@@ -802,6 +849,7 @@ static int open_decoder(Engine *e, OutStream *os)
     if (os->type == AVMEDIA_TYPE_VIDEO)
         os->dec->framerate = av_guess_frame_rate(e->ifmt, os->in_st, NULL);
     av_dict_set(&opts, "threads", "auto", 0);
+    mark(e);
     ret = avcodec_open2(os->dec, dc, &opts);
     av_dict_free(&opts);
     if (ret < 0)
@@ -913,6 +961,7 @@ static int setup(Engine *e)
     if (!(e->ifmt = avformat_alloc_context()))
         return AVERROR(ENOMEM);
     e->ifmt->interrupt_callback = (AVIOInterruptCB){ interrupt_cb, e };
+    mark(e);
     if ((ret = avformat_open_input(&e->ifmt, job->input, NULL, NULL)) < 0)
         return fail(e, ret, "cannot open input %s", job->input);
     if ((ret = avformat_find_stream_info(e->ifmt, NULL)) < 0)
@@ -969,9 +1018,20 @@ static int setup(Engine *e)
     if (job->copy_chapters && (ret = copy_chapters(e)) < 0)
         return ret;
 
-    if (!(e->ofmt->oformat->flags & AVFMT_NOFILE)) {
+    if (e->dry_run) {
+        /* muxers without a file (image2, segment, hls...) would create files
+         * while writing their header: they are not dry-run */
+        if (e->ofmt->oformat->flags & AVFMT_NOFILE)
+            return 0;
+        uint8_t *buf = av_malloc(4096);
+        if (!buf || !(e->ofmt->pb = avio_alloc_context(buf, 4096, 1, e, NULL, null_write, null_seek))) {
+            av_free(buf);
+            return AVERROR(ENOMEM);
+        }
+    } else if (!(e->ofmt->oformat->flags & AVFMT_NOFILE)) {
         if (!job->overwrite && avio_check(job->output, 0) >= 0)
             return fail(e, AVERROR(EEXIST), "%s already exists (set \"overwrite\": true)", job->output);
+        mark(e);
         if ((ret = avio_open(&e->ofmt->pb, job->output, AVIO_FLAG_WRITE)) < 0)
             return fail(e, ret, "cannot create %s", job->output);
         e->output_opened = 1;
@@ -979,6 +1039,7 @@ static int setup(Engine *e)
 
     if ((ret = av_dict_copy(&opts, job->muxer_options, 0)) < 0)
         return ret;
+    mark(e);
     ret = avformat_write_header(e->ofmt, &opts);
     left = av_dict_iterate(opts, NULL);
     if (ret >= 0 && left)
@@ -987,6 +1048,7 @@ static int setup(Engine *e)
     if (ret < 0)
         return fail(e, ret, "cannot write the %s header", e->ofmt->oformat->name);
     e->header_written = 1;
+    e->header_checked = e->dry_run;
     return 0;
 }
 
@@ -996,12 +1058,13 @@ static int run(Engine *e)
 {
     int ret;
 
-    if ((ret = setup(e)) < 0)
+    if ((ret = setup(e)) < 0 || e->dry_run)
         return ret;
     if (!(e->pkt = av_packet_alloc()))
         return AVERROR(ENOMEM);
 
     while (!cancelled(e)) {
+        mark(e);
         ret = av_read_frame(e->ifmt, e->pkt);
         if (ret == AVERROR_EOF || (ret == AVERROR_EXIT && cancelled(e)))
             break;
@@ -1028,15 +1091,17 @@ static int run(Engine *e)
     return cancelled(e) ? AVERROR_EXIT : 0;
 }
 
-int engine_run(const ConvJob *job, const EngineCallbacks *cb, atomic_int *cancel,
-               EngineStats *stats, char *err, size_t errlen)
+static int execute(const ConvJob *job, const EngineCallbacks *cb, atomic_int *cancel,
+                   EngineStats *stats, char *err, size_t errlen, int dry_run, int *header_checked)
 {
     Engine e = {
-        .job    = job,
-        .cancel = cancel,
-        .err    = err,
-        .errlen = errlen,
-        .t0     = av_gettime_relative(),
+        .job     = job,
+        .cancel  = cancel,
+        .err     = err,
+        .errlen  = errlen,
+        .t0      = av_gettime_relative(),
+        .dry_run = dry_run,
+        .cap     = { .level = AV_LOG_ERROR, .forward = !dry_run },
     };
     int ret, tret;
 
@@ -1044,12 +1109,18 @@ int engine_run(const ConvJob *job, const EngineCallbacks *cb, atomic_int *cancel
         err[0] = '\0';
     if (cb)
         e.cb = *cb;
+    logcap_ensure_installed();
+    logcap_begin(&e.cap);
 
     ret = run(&e);
 
-    if (e.header_written && (tret = av_write_trailer(e.ofmt)) < 0 && ret >= 0)
-        ret = fail(&e, tret, "cannot finalise %s", job->output);
-    report(&e, 1);
+    if (!dry_run) {
+        mark(&e);
+        if (e.header_written && (tret = av_write_trailer(e.ofmt)) < 0 && ret >= 0)
+            ret = fail(&e, tret, "cannot finalise %s", job->output);
+        report(&e, 1);
+    }
+    logcap_end();
     if (ret == AVERROR_EXIT && err && errlen && !err[0])
         snprintf(err, errlen, "cancelled");
 
@@ -1067,8 +1138,12 @@ int engine_run(const ConvJob *job, const EngineCallbacks *cb, atomic_int *cancel
     }
     av_free(e.os);
     av_packet_free(&e.pkt);
-    if (e.ofmt && e.output_opened)
+    if (e.ofmt && e.output_opened) {
         avio_closep(&e.ofmt->pb);
+    } else if (e.ofmt && dry_run && e.ofmt->pb) {
+        av_freep(&e.ofmt->pb->buffer);
+        avio_context_free(&e.ofmt->pb);
+    }
     avformat_free_context(e.ofmt);
     avformat_close_input(&e.ifmt);
 
@@ -1076,5 +1151,18 @@ int engine_run(const ConvJob *job, const EngineCallbacks *cb, atomic_int *cancel
         delete_file(job->output);
     if (stats)
         *stats = e.stats;
+    if (header_checked)
+        *header_checked = e.header_checked;
     return ret;
+}
+
+int engine_run(const ConvJob *job, const EngineCallbacks *cb, atomic_int *cancel,
+               EngineStats *stats, char *err, size_t errlen)
+{
+    return execute(job, cb, cancel, stats, err, errlen, 0, NULL);
+}
+
+int engine_dry_run(const ConvJob *job, int *header_checked, char *err, size_t errlen)
+{
+    return execute(job, NULL, NULL, NULL, err, errlen, 1, header_checked);
 }

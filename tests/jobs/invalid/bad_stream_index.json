@@ -1,0 +1,1 @@
+{ "_expect": "input has no stream 9 .it has 3.", "input": "tests/media/m3_in.mkv", "output": "build/v.mp4", "overwrite": true, "streams": [ { "input": 9, "action": "copy" } ] }

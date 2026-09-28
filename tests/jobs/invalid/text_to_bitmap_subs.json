@@ -1,0 +1,1 @@
+{ "_expect": "text subtitles cannot be converted to bitmap", "input": "tests/media/m3_in.mkv", "output": "build/v.mkv", "overwrite": true, "streams": [ { "input": 2, "action": "transcode", "encoder": "dvdsub" } ] }

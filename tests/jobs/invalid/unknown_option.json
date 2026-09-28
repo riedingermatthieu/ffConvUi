@@ -1,0 +1,1 @@
+{ "_expect": "no option 'crff' .did you mean 'crf'", "input": "tests/media/m3_in.mkv", "output": "build/v.mp4", "overwrite": true, "streams": [ { "input": 0, "action": "transcode", "encoder": "libx264", "options": { "crff": 20 } } ] }

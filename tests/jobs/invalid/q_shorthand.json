@@ -1,0 +1,1 @@
+{ "_expect": "'q' is ffmpeg CLI shorthand.*global_quality", "input": "tests/media/m3_in.mkv", "output": "build/v.ogg", "overwrite": true, "streams": [ { "input": 1, "action": "transcode", "encoder": "libvorbis", "options": { "q": 5 } } ] }

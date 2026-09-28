@@ -1,0 +1,1 @@
+{ "_expect": "muxer mp4 has no option 'movflagz' .did you mean 'movflags'", "input": "tests/media/m3_in.mkv", "output": "build/v.mp4", "overwrite": true, "muxer_options": { "movflagz": "+faststart" }, "streams": [ { "input": 0, "action": "copy" } ] }

@@ -1,5 +1,5 @@
 /*
- * convcli - headless front end for the converter core (milestones M1-M3).
+ * convcli - headless front end for the converter core (milestones M1-M4).
  *
  *   convcli version [--config]
  *   convcli probe <file>
@@ -12,6 +12,7 @@
  *   convcli hw
  *   convcli job-template <file> [--muxer <key>] [--output <file>]
  *   convcli run <job.json> [--overwrite] [--quiet] [--cancel-after <seconds>]
+ *   convcli validate <job.json> [--static]
  */
 #include <inttypes.h>
 #include <signal.h>
@@ -40,6 +41,7 @@
 #include "engine.h"
 #include "job.h"
 #include "probe.h"
+#include "validate.h"
 
 /* ------------------------------------------------------------------------- */
 /* argument helpers                                                          */
@@ -990,6 +992,55 @@ static int cmd_run(const Args *a)
 }
 
 /* ------------------------------------------------------------------------- */
+/* validate                                                                  */
+
+static int cmd_validate(const Args *a)
+{
+    const char *path = arg_positional(a, 0);
+    unsigned flags   = arg_flag(a, "--static") ? 0 : VALIDATE_DRY_RUN;
+    ConvJob *job = NULL;
+    Caps *caps = NULL;
+    ValReport rep;
+    char err[1024];
+    int ret;
+
+    if (!path) {
+        fprintf(stderr, "usage: convcli validate <job.json> [--static]\n");
+        return AVERROR(EINVAL);
+    }
+    if ((ret = job_load(path, &job, err, sizeof(err))) < 0) {
+        printf("error    job: %s\n", err);
+        printf("Result: invalid job file\n");
+        return ret;
+    }
+    if ((ret = load_caps(&caps)) < 0 || (ret = validate_job(job, caps, NULL, flags, &rep)) < 0)
+        goto end;
+
+    for (int i = 0; i < rep.nb_issues; i++) {
+        const ValIssue *is = &rep.issues[i];
+        char where[96];
+
+        if (is->stream >= 0)
+            snprintf(where, sizeof(where), "#%d%s%s", is->stream, is->field[0] ? " " : "", is->field);
+        else
+            snprintf(where, sizeof(where), "%s", is->field[0] ? is->field : "job");
+        printf("%-8s %-22s %s\n", validate_severity_name(is->severity), where, is->message);
+    }
+    printf("Result: %d error(s), %d warning(s)%s - %s\n", rep.nb_errors, rep.nb_warnings,
+           !(flags & VALIDATE_DRY_RUN) ? ", static checks only" :
+           !rep.dry_run_done ? ", dry run skipped until these are fixed" :
+           rep.nb_errors ? ", dry run failed" : ", dry run passed",
+           rep.nb_errors ? "the job would fail" : "the job is valid");
+    ret = rep.nb_errors ? AVERROR(EINVAL) : 0;
+    validate_report_free(&rep);
+
+end:
+    caps_free(&caps);
+    job_free(&job);
+    return ret;
+}
+
+/* ------------------------------------------------------------------------- */
 
 static void usage(void)
 {
@@ -1012,7 +1063,8 @@ static void usage(void)
         "  job-template <file> [--muxer <key>] [--output <file>]\n"
         "                                              print a starting job (JSON) for a file\n"
         "  run <job.json> [--overwrite] [--quiet] [--cancel-after <seconds>]\n"
-        "                                              run a conversion job (Ctrl+C cancels)\n");
+        "                                              run a conversion job (Ctrl+C cancels)\n"
+        "  validate <job.json> [--static]              check a job: static checks, then a dry run\n");
 }
 
 #ifdef _WIN32
@@ -1044,7 +1096,7 @@ int main(int argc, char **argv)
         { "version", cmd_version }, { "probe", cmd_probe },     { "muxers", cmd_muxers },
         { "encoders", cmd_encoders }, { "actions", cmd_actions }, { "filters", cmd_filters },
         { "options", cmd_options }, { "hw", cmd_hw },         { "job-template", cmd_job_template },
-        { "run", cmd_run },
+        { "run", cmd_run },           { "validate", cmd_validate },
     };
     char **wargs = NULL;
     Args args;

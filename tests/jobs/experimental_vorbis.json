@@ -1,0 +1,1 @@
+{ "input": "tests/media/a441.wav", "output": "build/o_vorbis.ogg", "overwrite": true, "streams": [ { "input": 0, "action": "transcode", "encoder": "vorbis" } ] }

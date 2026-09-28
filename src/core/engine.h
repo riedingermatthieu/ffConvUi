@@ -47,4 +47,14 @@ typedef struct EngineStats {
 int engine_run(const ConvJob *job, const EngineCallbacks *cb, atomic_int *cancel,
                EngineStats *stats, char *err, size_t errlen);
 
+/*
+ * Set up everything engine_run() would (input, decoders, filter graphs,
+ * encoders with their options, muxer with its options and header) without
+ * processing any media; the header goes to a null sink, no file is created.
+ * *header_checked is set to 0 for muxers without a file (image2, hls,
+ * segment...), whose header is not written. FFmpeg's log is not printed:
+ * its last error is included in err.
+ */
+int engine_dry_run(const ConvJob *job, int *header_checked, char *err, size_t errlen);
+
 #endif /* CONV_ENGINE_H */

@@ -1,7 +1,8 @@
 # Tests
 
 * `media/`: small synthetic input files (generated with the `ffmpeg` CLI, see below).
-* `jobs/`: conversion jobs run by CTest (`job_<name>`). Paths are relative to
+* `jobs/`: conversion jobs run by CTest (`job_<name>`); `jobs/invalid/`: jobs
+  that must fail validation. Paths are relative to
   the project root: inputs in `tests/media/`, outputs in `build/`.
 * `run_job.cmake`: end-to-end test (`e2e_mp4/mkv/webm`): `job-template` → `run` → `probe`.
 
@@ -20,6 +21,19 @@ cmake -S . -B build -G Ninja && cmake --build build && (cd build && ctest)
 | `copy_mov` | stream copy only |
 | `drawtext_escaping` | filter option value containing `: , [ ] ; ' %` |
 | `cancel`, `cancel_keep_partial` | cancellation after 1 s: output removed / kept and valid |
+| `ts_copy_maybe` | H.264/AC3 copy into MPEG-TS: static "maybe", confirmed by the dry run |
+| `experimental_vorbis` | FFmpeg's experimental native Vorbis encoder: valid, with a warning |
+
+Every job above is also validated (`validate_<name>`, dry run included).
+
+`jobs/invalid/` holds jobs that must fail validation (`invalid_<name>`, run
+by `validate_expect.cmake`): the output must match the job's `"_expect"`
+regular expression. They cover unknown encoders/filters/muxers/options (with
+suggestions), CLI shorthands (`q`, `b:a`), container ↔ codec mismatches,
+text→bitmap subtitles, filters of the wrong type or class, bad option values
+(found by the dry run: `preset=warp`, `fps=fast`, libopus + 5.1(side)), a
+"maybe" rejected by the dry run (H.264 in Ogg), a missing output folder and a
+bad stream index.
 
 ## Regenerating the media
 

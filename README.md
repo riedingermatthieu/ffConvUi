@@ -1,4 +1,4 @@
-# ffconv: FFmpeg converter core (M1–M3)
+# ffconv: FFmpeg converter core (M1–M4)
 
 A C11 library (`convcore`) that uses the FFmpeg API to describe an input file,
 list every conversion the linked FFmpeg build can do with it, and run a
@@ -11,8 +11,10 @@ later and will use the same library.
 | `src/core/caps.*` | M2 | Capability catalog: every muxer, encoder (with supported pixel/sample formats, rates, layouts) and filter (classified simple/hw/convert/multi-in/multi-out/source/sink). Narrowing queries: containers for a file, per-stream copy/transcode choices for a container, filters for a media type, usable hardware devices. |
 | `src/core/avopt_schema.*` | M2 | Converts `AVOption` metadata (type, default, range, named constants, flags, aliases, child classes) into a toolkit-neutral schema from which option editors can be generated. |
 | `src/core/job.*`, `json.*` | M3 | `ConvJob`: the user's choices as plain data (container, per-stream copy/transcode/drop, encoder options, filter chains, metadata), loaded from / saved to JSON. Small built-in JSON parser, locale-independent. |
-| `src/core/engine.*` | M3 | Runs a job: demux → decode → filter → encode → mux, or stream copy. Progress callback, cancellation from another thread. |
-| `src/cli/convcli.c` | M1–M3 | Test front end. |
+| `src/core/engine.*` | M3 | Runs a job: demux → decode → filter → encode → mux, or stream copy. Progress callback, cancellation from another thread, dry run. |
+| `src/core/validate.*` | M4 | Checks a job before running it: static checks, then a dry run; reports every problem with its stream and field. |
+| `src/core/logcap.*` | M4 | Captures FFmpeg's log per thread, so errors carry FFmpeg's own reason. |
+| `src/cli/convcli.c` | M1–M4 | Test front end. |
 
 ## Build (Windows, MSYS2 MINGW64)
 
@@ -49,6 +51,7 @@ convcli options  encoder|muxer|filter <name> [--generic]
 convcli hw
 convcli job-template <file> [--muxer <key>] [--output <file>]
 convcli run <job.json> [--overwrite] [--quiet] [--cancel-after <seconds>]
+convcli validate <job.json> [--static]
 ```
 
 Examples:
@@ -116,6 +119,32 @@ Based on FFmpeg's `doc/examples/transcode.c`, with these differences:
   the output unless `keep_partial`. Errors also delete the output unless
   `keep_partial`.
 
+## Validation
+
+`convcli validate job.json` (or `validate_job()`) reports every problem, each
+with a severity, the stream and the field it concerns:
+
+```text
+error    #0 options.crff        encoder libx264 has no option 'crff' (did you mean 'crf'?)
+error    #1                     stream #0: cannot open encoder libopus: Invalid argument (libopus: Invalid channel layout 5.1(side) for specified mapping family -1.)
+warning  #0 encoder             vorbis is experimental
+info     #0 action              mpegts accepts this stream (dry run)
+Result: 2 error(s), 1 warning(s), dry run failed - the job would fail
+```
+
+* **Static pass** (fast, `--static`, meant for live feedback while editing):
+  paths (input readable, output folder exists, not the input, overwrite),
+  container ↔ codec for copies and encoders, encoder/filter/muxer names with
+  "did you mean" suggestions, option names (plus hints for ffmpeg CLI syntax
+  such as `q` or `b:v`), subtitle kinds, filter classes and media types, and
+  filter option values (the chain is parsed in a scratch graph).
+* **Dry run** (when the static pass found no error): each stream is set up
+  alone with `engine_dry_run()` (decoder, filters, encoder with the real
+  option values, muxer header written to a null sink), then the whole job with
+  the muxer options. "maybe" warnings become *accepted* (info) or errors.
+* FFmpeg's own explanation is captured from its log (`logcap`) and appended
+  to error messages, in validation and in `run` alike.
+
 ## How "what is possible" is decided
 
 * **Container ↔ codec**: `avformat_query_codec()`. A result of *unknown* is
@@ -156,19 +185,23 @@ Based on FFmpeg's `doc/examples/transcode.c`, with these differences:
   resolution change; VFR input (gaps preserved); MPEG-4/AVI; copy-only
   remux; `drawtext` text containing `: , [ ] ; ' %`; Unicode output path;
   cancellation with and without `keep_partial`; 18 error cases.
+* **M4**: the 10 jobs in `tests/jobs` pass validation (dry run included); the
+  19 jobs in `tests/jobs/invalid` fail with the expected message (Opus in
+  AVI, text→bitmap subtitles, bad option name/value, libopus + 5.1(side),
+  `q` shorthand, Ogg + H.264 "maybe" rejected by the dry run...). MPEG-TS +
+  H.264 "maybe" is confirmed by the dry run. Dry runs create no files.
 
 ## Known limitations
 
-* Some encoder constraints are only checked when the encoder opens, e.g.
-  libopus rejects 5.1(side) (add `aformat=channel_layouts=5.1`), and the
-  `ffmpeg` CLI shorthand `-q:a` is not an option name (it sets
-  `global_quality` + the `qscale` flag). M4 validation will catch these before
-  running.
-* Error messages for some failures ("cannot write the mp4 header: Invalid
-  argument") are generic; the specific reason is in FFmpeg's log line
-  printed just before. The UI will capture that log (M5).
-* Libraries that print directly to the console (SVT-AV1's banner, x265) are
-  not silenced by `--quiet`.
+* Constraints that FFmpeg only checks when an encoder opens (libopus rejects
+  5.1(side): add `aformat=channel_layouts=5.1`) are found by the dry run, not
+  by the static pass, so live feedback in the UI will not show them.
+* Filter option values evaluated at configuration time (e.g. `fps=fast`) are
+  likewise only caught by the dry run.
+* Muxers that write their own files (image2, hls, segment...) are not dry-run.
+* Log messages from codecs' internal threads are not captured; libraries that
+  print directly to the console (x264/x265/SVT-AV1) are neither captured nor
+  silenced by `--quiet`.
 * Software only: hardware decoding/filtering/encoding is M9 (hardware
   *encoders* fed with software frames may already work).
 * Audio muxers with cover-art support (mp3, flac) report that they can "keep"

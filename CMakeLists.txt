@@ -33,7 +33,9 @@ add_library(convcore STATIC
     src/core/avopt_schema.c
     src/core/json.c
     src/core/job.c
-    src/core/engine.c)
+    src/core/engine.c
+    src/core/logcap.c
+    src/core/validate.c)
 target_include_directories(convcore PUBLIC src/core)
 target_link_libraries(convcore PUBLIC PkgConfig::FFMPEG)
 target_compile_options(convcore PRIVATE ${CONV_WARNINGS})
@@ -74,6 +76,9 @@ file(MAKE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/build")
 file(GLOB CONV_TEST_JOBS "${CMAKE_CURRENT_SOURCE_DIR}/tests/jobs/*.json")
 foreach(job ${CONV_TEST_JOBS})
     get_filename_component(name "${job}" NAME_WE)
+    # every valid job must also pass validation, dry run included
+    add_test(NAME validate_${name} COMMAND convcli validate "${job}"
+             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     if(name MATCHES "^cancel")
         add_test(NAME job_${name} COMMAND convcli run "${job}" --overwrite --quiet --cancel-after 1
                  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -83,4 +88,14 @@ foreach(job ${CONV_TEST_JOBS})
         add_test(NAME job_${name} COMMAND convcli run "${job}" --overwrite --quiet
                  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     endif()
+endforeach()
+
+# Jobs in tests/jobs/invalid must fail validation with the message in "_expect".
+file(GLOB CONV_INVALID_JOBS "${CMAKE_CURRENT_SOURCE_DIR}/tests/jobs/invalid/*.json")
+foreach(job ${CONV_INVALID_JOBS})
+    get_filename_component(name "${job}" NAME_WE)
+    add_test(NAME invalid_${name}
+             COMMAND ${CMAKE_COMMAND} -DCONVCLI=$<TARGET_FILE:convcli> -DJOB=${job}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/validate_expect.cmake
+             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 endforeach()

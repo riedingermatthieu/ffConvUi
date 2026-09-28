@@ -1,0 +1,1 @@
+{ "_expect": "unknown muxer 'mp5' .did you mean 'mp4'", "input": "tests/media/m3_in.mkv", "output": "build/v.mp4", "muxer": "mp5", "overwrite": true, "streams": [ { "input": 0, "action": "copy" } ] }

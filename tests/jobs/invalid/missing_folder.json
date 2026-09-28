@@ -1,0 +1,1 @@
+{ "_expect": "folder build/no_such_folder does not exist", "input": "tests/media/m3_in.mkv", "output": "build/no_such_folder/v.mp4", "overwrite": true, "streams": [ { "input": 0, "action": "copy" } ] }

@@ -1,0 +1,1 @@
+{ "_expect": "stream specifiers.*use 'b'", "input": "tests/media/m3_in.mkv", "output": "build/v.mp4", "overwrite": true, "streams": [ { "input": 1, "action": "transcode", "encoder": "aac", "options": { "b:a": "128k" } } ] }

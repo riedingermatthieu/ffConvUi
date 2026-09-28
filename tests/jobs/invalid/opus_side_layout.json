@@ -1,0 +1,1 @@
+{ "_expect": "libopus.*Invalid channel layout 5.1.side.", "input": "tests/media/m3_in.mkv", "output": "build/v.opus", "overwrite": true, "streams": [ { "input": 1, "action": "transcode", "encoder": "libopus" } ] }

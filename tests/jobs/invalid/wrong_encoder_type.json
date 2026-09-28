@@ -1,0 +1,1 @@
+{ "_expect": "aac is an audio encoder but input stream 0 is video", "input": "tests/media/m3_in.mkv", "output": "build/v.mp4", "overwrite": true, "streams": [ { "input": 0, "action": "transcode", "encoder": "aac" } ] }

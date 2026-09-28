@@ -1,0 +1,1 @@
+{ "input": "tests/media/m3_in.mkv", "output": "build/o_maybe.ts", "overwrite": true, "streams": [ { "input": 0, "action": "copy" }, { "input": 1, "action": "copy" } ] }
