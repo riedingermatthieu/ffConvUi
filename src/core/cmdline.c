@@ -199,6 +199,20 @@ void job_to_ffmpeg_command(const ConvJob *job, const MediaInfo *mi, CmdShell sh,
 
     av_bprintf(bp, "ffmpeg");
     append_arg(bp, job->overwrite ? "-y" : "-n", sh);
+    /* input options: seek to the trim start, read up to the trim end */
+    if (job->trim_start > 0 || job->trim_end > 0) {
+        char t[32];
+        if (job->trim_start > 0) {
+            snprintf(t, sizeof(t), "%.6g", job->trim_start);
+            for (char *p = t; *p; p++) if (*p == ',') *p = '.';
+            append_option(bp, "ss", NULL, t, sh);
+        }
+        if (job->trim_end > 0) {
+            snprintf(t, sizeof(t), "%.6g", job->trim_end);
+            for (char *p = t; *p; p++) if (*p == ',') *p = '.';
+            append_option(bp, "to", NULL, t, sh);
+        }
+    }
     append_arg(bp, "-i", sh);
     append_arg(bp, job->input ? job->input : "", sh);
     if (!job->copy_metadata)

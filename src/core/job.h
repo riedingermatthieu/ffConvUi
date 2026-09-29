@@ -11,6 +11,7 @@
  *   "overwrite": false, "keep_partial": false,
  *   "copy_metadata": true, "copy_chapters": true,
  *   "metadata": { "title": "My film" },     // "" removes a key
+ *   "trim": { "start": 12.5, "end": 70 },   // seconds, optional; copies start at a key frame
  *   "streams": [
  *     { "input": 0, "action": "transcode", "encoder": "libx265",
  *       "options": { "crf": 26, "preset": "fast" },
@@ -65,6 +66,8 @@ typedef struct ConvJob {
     int           copy_metadata;
     int           copy_chapters;
     AVDictionary *metadata;      /* global metadata overrides */
+    double        trim_start;    /* seconds from the input's start, 0 = beginning */
+    double        trim_end;      /* seconds from the input's start, 0 = end */
     JobStream    *streams;
     int           nb_streams;
 } ConvJob;

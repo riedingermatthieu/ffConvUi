@@ -1,4 +1,4 @@
-# ffconv: FFmpeg converter (M1–M6)
+# ffconv: FFmpeg converter (M1–M6, M10)
 
 A C11 library (`convcore`) that uses the FFmpeg API to describe an input file,
 list every conversion the linked FFmpeg build can do with it, check and run a
@@ -15,6 +15,7 @@ built on the same library.
 | `src/core/validate.*` | M4 | Checks a job before running it: static checks, then a dry run; reports every problem with its stream and field. |
 | `src/core/logcap.*` | M4 | Captures FFmpeg's log per thread, so errors carry FFmpeg's own reason. |
 | `src/core/cmdline.*` | — | The `ffmpeg` command line equivalent to a job, quoted for Bash, PowerShell or cmd. |
+| `src/core/preview.*` | M10 | One video frame before and after conversion (a short clip converted by the engine, then decoded). |
 | `src/cli/convcli.c` | M1–M4 | Test front end. |
 | `src/ui/*` | M5–M6 | GTK 4 application: main window, stream rows, option editor, progress window, FFmpeg log view. |
 
@@ -64,6 +65,7 @@ convcli job-template <file> [--muxer <key>] [--output <file>]
 convcli run <job.json> [--overwrite] [--quiet] [--cancel-after <seconds>]
 convcli validate <job.json> [--static]
 convcli command <job.json> [--shell bash|powershell|cmd]
+convcli preview <job.json> [--time <s>] [--stream <n>] --before <png> --after <png>
 ```
 
 Examples:
@@ -89,6 +91,7 @@ comment at the top of [src/core/job.h](src/core/job.h). In short:
   "overwrite": false, "keep_partial": false,
   "copy_metadata": true, "copy_chapters": true,
   "metadata": { "title": "My film" },          // "" removes a key
+  "trim": { "start": 12.5, "end": 70 },        // seconds from the input's start, optional
   "streams": [
     { "input": 0, "action": "transcode", "encoder": "libx265",
       "options": { "crf": 26, "preset": "fast" },
@@ -158,6 +161,48 @@ Result: 2 error(s), 1 warning(s), dry run failed - the job would fail
   the muxer options. "maybe" warnings become *accepted* (info) or errors.
 * FFmpeg's own explanation is captured from its log (`logcap`) and appended
   to error messages, in validation and in `run` alike.
+
+## Trim
+
+A job can keep only part of the input: `"trim": { "start": 12.5, "end": 70 }`
+(seconds from the input's start, either one optional). As with
+`ffmpeg -ss … -to … -i`:
+
+* the input is sought to the key frame before the start, and the output
+  starts at 0;
+* converted streams are cut exactly, with `trim` / `atrim` at the head of
+  their filter chain (frame-accurate video, sample-accurate audio);
+* copied video starts at that key frame (cutting between key frames needs
+  re-encoding); copied audio, subtitles and data drop what ends before the
+  start; everything stops at the end.
+
+Checked against `ffmpeg -ss 3.2 -to 6.5`: identical video (every frame); the
+audio is the same signal, cut 93 samples (1.9 ms) apart, because the
+source's AC3 timestamps are in milliseconds and the two programs smooth them
+differently after the seek. Copied subtitles differ on purpose: `ffmpeg`
+keeps events that end before the start, which then shifts the whole file.
+
+## Preview (M10)
+
+*Preview…* in the main window opens a window with the file's video streams, a
+time slider, and the frame at that time **before** and **after** conversion,
+side by side, or at *Actual pixels* (both at 100 %, scrolling together).
+
+* The result is real: a 1.5 s clip around the frame (0.5 s before, 1 s after,
+  for rate control and look-ahead) is converted by the engine with the
+  stream's encoder, options and filters, then decoded. The caption shows the
+  encoder, resolution, pixel format and the clip's bitrate.
+* It follows the main window: changing an encoder, an option or a filter
+  renders again (300 ms after the last change). Rendering runs on a worker
+  thread; a render that became outdated is cancelled.
+* Copied streams show the original frame twice; dropped streams have nothing
+  to show.
+* `convcli preview job.json --time 4.5 --before b.png --after a.png` does the
+  same from the command line.
+
+Checked with a lossless encoder (FFV1): the result frame is the original frame,
+pixel for pixel, at every time tested (`preview_lossless` test). That check
+found an off-by-22 ms error in finding the frame in the clip, now fixed.
 
 ## App icon
 
@@ -260,6 +305,7 @@ ffmpeg -y -i in.mkv -map 0:0 -c:v:0 libx265 -crf:v:0 28 -filter:v:0 scale=w=1280
 * Each stream is `-map 0:<input index>` followed by its options, with output
   stream specifiers counted per type in the job's order (`v:0`, `a:1`…).
 * Quality (`global_quality` + the `qscale` flag) is written as `-q`.
+* A trim becomes `-ss` / `-to` before `-i`.
 * Metadata overrides become `-metadata` / `-metadata:s:<spec>`; turning off
   metadata or chapter copying becomes `-map_metadata -1` / `-map_chapters -1`.
 * Quoting: Bash uses `'…'`; PowerShell `'…'` (it also quotes commas, which
@@ -325,8 +371,11 @@ its removal of stale Matroska statistics tags on re-encoded streams.
 
 ## Known limitations
 
-* UI: filters cannot be edited yet (M7). Trim, metadata editing and presets
-  are M8.
+* UI: filters cannot be edited yet (M7). Trim (supported by the engine and
+  job files), metadata editing and presets have no UI yet (M8).
+* Preview: the result comes from a 1.5 s clip, so rate control (and the
+  bitrate shown) can differ a little from the whole-file conversion. Video
+  only: no audio preview yet.
 * UI: `ffconv.exe` only runs where the MSYS2 `mingw64/bin` DLLs are found (no
   installer or bundled DLLs yet).
 * UI: the file dialogs, drag and drop and *Show in folder* were not exercised

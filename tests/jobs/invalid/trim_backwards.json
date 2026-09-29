@@ -1,0 +1,1 @@
+{ "_expect": "the trim end .2.000 s. must be after its start .5.000 s.", "input": "tests/media/m3_in.mkv", "output": "build/v.mkv", "overwrite": true, "trim": { "start": 5, "end": 2 }, "streams": [ { "input": 0, "action": "copy" } ] }

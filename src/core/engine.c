@@ -19,12 +19,9 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 #include <libavcodec/avcodec.h>
 #include <libavfilter/avfilter.h>
@@ -38,6 +35,7 @@
 #include <libavutil/time.h>
 
 #include "caps.h"
+#include "fsutil.h"
 #include "logcap.h"
 
 #define SUB_BUF_SIZE         (1 << 20)
@@ -96,6 +94,9 @@ typedef struct Engine {
     double           in_start;       /* seconds */
     double           duration;       /* seconds, 0 if unknown */
     double           out_time;       /* seconds written, relative to in_start */
+    int64_t          trim_start;     /* AV_TIME_BASE, absolute; AV_NOPTS_VALUE = from the beginning */
+    int64_t          trim_end;       /* AV_TIME_BASE, absolute; INT64_MAX = to the end */
+    int64_t          shift;          /* subtracted from output timestamps (the trim start) */
     int64_t          frames;
 } Engine;
 
@@ -199,25 +200,6 @@ static int same_path(const char *a, const char *b)
 #endif
 }
 
-static void delete_file(const char *path)
-{
-    const char *proto = avio_find_protocol_name(path);
-
-    if (!proto || strcmp(proto, "file"))
-        return;
-    av_strstart(path, "file:", &path);
-#ifdef _WIN32
-    {
-        int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
-        wchar_t *w = n > 0 ? av_malloc_array(n, sizeof(*w)) : NULL;
-        if (w && MultiByteToWideChar(CP_UTF8, 0, path, -1, w, n) > 0)
-            DeleteFileW(w);
-        av_free(w);
-    }
-#else
-    remove(path);
-#endif
-}
 
 /* Matroska statistics tags describe the old encoding: drop them when the
  * stream is re-encoded (the muxer writes fresh ones). */
@@ -384,6 +366,24 @@ static int build_graph(Engine *e, OutStream *os, const AVFrame *frame, int exact
         goto end;
     }
 
+    /* trim first, as ffmpeg -ss/-to does: frame-accurate for video,
+     * sample-accurate for audio (the times are the input's own timestamps) */
+    if (e->trim_start != AV_NOPTS_VALUE || e->trim_end != INT64_MAX) {
+        char t[32];
+        av_bprintf(&desc, "%s", video ? "trim=" : "atrim=");
+        if (e->trim_start != AV_NOPTS_VALUE) {
+            snprintf(t, sizeof(t), "%.6f", e->trim_start / (double)AV_TIME_BASE);
+            av_bprintf(&desc, "start=%s", t);
+        }
+        if (e->trim_end != INT64_MAX) {
+            snprintf(t, sizeof(t), "%.6f", e->trim_end / (double)AV_TIME_BASE);
+            av_bprintf(&desc, "%send=%s", e->trim_start != AV_NOPTS_VALUE ? ":" : "", t);
+        }
+        for (char *p = desc.str; *p; p++)   /* whatever the locale */
+            if (*p == ',')
+                *p = '.';
+        av_bprint_chars(&desc, ',', 1);
+    }
     av_bprintf(&desc, "%s", os->chain[0] ? os->chain : (video ? "null" : "anull"));
     {
         AVBPrint tail;
@@ -580,6 +580,22 @@ static int open_encoder(Engine *e, OutStream *os)
 /* ------------------------------------------------------------------------- */
 /* packet flow                                                               */
 
+/* Where a timestamp (in `tb`, lasting `dur`) falls relative to the trim range:
+ * -1 entirely before the start, 1 at or after the end, 0 inside. */
+static int trim_side(const Engine *e, int64_t ts, int64_t dur, AVRational tb)
+{
+    int64_t t;
+
+    if (ts == AV_NOPTS_VALUE)
+        return 0;
+    t = av_rescale_q(ts, tb, AV_TIME_BASE_Q);
+    if (t >= e->trim_end)
+        return 1;
+    if (e->trim_start != AV_NOPTS_VALUE && t + (dur > 0 ? av_rescale_q(dur, tb, AV_TIME_BASE_Q) : 0) <= e->trim_start)
+        return -1;
+    return 0;
+}
+
 static int write_packet(Engine *e, OutStream *os, AVPacket *pkt, AVRational tb)
 {
     int64_t ts;
@@ -588,10 +604,17 @@ static int write_packet(Engine *e, OutStream *os, AVPacket *pkt, AVRational tb)
     pkt->stream_index = os->out_st->index;
     pkt->pos          = -1;
     av_packet_rescale_ts(pkt, tb, os->out_st->time_base);
+    if (e->shift) {   /* a trimmed output starts at 0, as with ffmpeg -ss */
+        int64_t s = av_rescale_q(e->shift, AV_TIME_BASE_Q, os->out_st->time_base);
+        if (pkt->pts != AV_NOPTS_VALUE)
+            pkt->pts -= s;
+        if (pkt->dts != AV_NOPTS_VALUE)
+            pkt->dts -= s;
+    }
 
     ts = pkt->pts != AV_NOPTS_VALUE ? pkt->pts : pkt->dts;
     if (ts != AV_NOPTS_VALUE) {
-        double t = ts * av_q2d(os->out_st->time_base) - e->in_start;
+        double t = ts * av_q2d(os->out_st->time_base) - (e->shift ? 0 : e->in_start);
         if (t > e->out_time)
             e->out_time = t;
     }
@@ -727,6 +750,10 @@ static int decode_packet(Engine *e, OutStream *os, const AVPacket *pkt)
             return fail(e, ret, "stream #%d: decoding", os->job_index);
 
         os->frame->pts = os->frame->best_effort_timestamp;
+        if (trim_side(e, os->frame->pts, os->frame->duration, os->in_st->time_base)) {
+            av_frame_unref(os->frame);   /* outside the trim range */
+            continue;
+        }
         ret = filter_frame(e, os, os->frame);
         av_frame_unref(os->frame);
         if (ret < 0)
@@ -759,6 +786,8 @@ static int transcode_subtitle(Engine *e, OutStream *os, const AVPacket *pkt)
     sub.pts += av_rescale_q(sub.start_display_time, ms, AV_TIME_BASE_Q);
     sub.end_display_time -= sub.start_display_time;
     sub.start_display_time = 0;
+    if (trim_side(e, sub.pts, av_rescale_q(sub.end_display_time, ms, AV_TIME_BASE_Q), AV_TIME_BASE_Q))
+        goto end;
 
     size = avcodec_encode_subtitle(os->enc, os->sub_buf, SUB_BUF_SIZE, &sub);
     if (size < 0) {
@@ -786,6 +815,14 @@ static int process_packet(Engine *e, OutStream *os, const AVPacket *pkt)
 
     switch (os->js->action) {
     case JOB_COPY:
+        /* video copies start at the key frame the seek landed on (cutting in
+         * between needs re-encoding); other copies drop what ends before
+         * the start, and everything is cut at the end */
+        {
+            int side = trim_side(e, pkt->pts, pkt->duration, os->in_st->time_base);
+            if (side > 0 || (side < 0 && os->type != AVMEDIA_TYPE_VIDEO))
+                return 0;
+        }
         if ((ret = av_packet_ref(os->pkt, pkt)) < 0)
             return ret;
         return write_packet(e, os, os->pkt, os->in_st->time_base);
@@ -969,6 +1006,25 @@ static int setup(Engine *e)
     e->in_start = e->ifmt->start_time != AV_NOPTS_VALUE ? e->ifmt->start_time / 1e6 : 0;
     e->duration = e->ifmt->duration != AV_NOPTS_VALUE ? e->ifmt->duration / 1e6 : 0;
 
+    /* trim: times are relative to the input's start, like ffmpeg -ss / -to */
+    if (job->trim_start > 0 || job->trim_end > 0) {
+        int64_t base = e->ifmt->start_time != AV_NOPTS_VALUE ? e->ifmt->start_time : 0;
+        double end = job->trim_end > 0 ? job->trim_end : e->duration;
+
+        if (job->trim_end > 0)
+            e->trim_end = base + llrint(job->trim_end * AV_TIME_BASE);
+        if (job->trim_start > 0) {
+            e->trim_start = base + llrint(job->trim_start * AV_TIME_BASE);
+            e->shift      = e->trim_start;
+            /* to the key frame before the start; frames before it are dropped */
+            mark(e);
+            if ((ret = avformat_seek_file(e->ifmt, -1, INT64_MIN, e->trim_start, e->trim_start, 0)) < 0)
+                av_log(NULL, AV_LOG_WARNING, "cannot seek to %.3f s, reading from the beginning\n",
+                       job->trim_start);
+        }
+        e->duration = end > job->trim_start ? end - job->trim_start : 0;
+    }
+
     /* output */
     if (job->muxer && !(of = caps_lookup_muxer(job->muxer)))
         return fail(e, AVERROR_MUXER_NOT_FOUND, "unknown muxer '%s'", job->muxer);
@@ -1071,6 +1127,14 @@ static int run(Engine *e)
         if (ret < 0)
             return fail(e, ret, "error reading %s", e->job->input);
 
+        /* past the trim end (with 2 s for interleaving and decoder delay): done */
+        if (e->trim_end != INT64_MAX && e->pkt->dts != AV_NOPTS_VALUE &&
+            av_rescale_q(e->pkt->dts, e->ifmt->streams[e->pkt->stream_index]->time_base, AV_TIME_BASE_Q) >
+                e->trim_end + 2 * AV_TIME_BASE) {
+            av_packet_unref(e->pkt);
+            break;
+        }
+
         for (int i = 0; i < e->nb_os && ret >= 0; i++)
             if (e->os[i].in_st->index == e->pkt->stream_index)
                 ret = process_packet(e, &e->os[i], e->pkt);
@@ -1101,6 +1165,8 @@ static int execute(const ConvJob *job, const EngineCallbacks *cb, atomic_int *ca
         .errlen  = errlen,
         .t0      = av_gettime_relative(),
         .dry_run = dry_run,
+        .trim_start = AV_NOPTS_VALUE,
+        .trim_end   = INT64_MAX,
         .cap     = { .level = AV_LOG_ERROR, .forward = !dry_run },
     };
     int ret, tret;
@@ -1148,7 +1214,7 @@ static int execute(const ConvJob *job, const EngineCallbacks *cb, atomic_int *ca
     avformat_close_input(&e.ifmt);
 
     if (ret < 0 && e.output_opened && !job->keep_partial)
-        delete_file(job->output);
+        conv_delete_file(job->output);
     if (stats)
         *stats = e.stats;
     if (header_checked)

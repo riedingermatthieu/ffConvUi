@@ -293,6 +293,32 @@ static int parse_stream(Ctx *c, const JsonValue *v, ConvJob *job, int idx)
     return 0;
 }
 
+static int get_trim(Ctx *c, const JsonValue *v, ConvJob *job)
+{
+    static const char *const keys[] = { "start", "end" };
+    double *dst[] = { &job->trim_start, &job->trim_end };
+    int ret;
+
+    if (!v || v->type == JSON_NULL)
+        return 0;
+    if ((ret = expect(c, v, JSON_OBJECT, "trim")) < 0)
+        return ret;
+    for (int i = 0; i < 2; i++) {
+        const JsonValue *t = json_get(v, keys[i]);
+        char path[16];
+
+        snprintf(path, sizeof(path), "trim.%s", keys[i]);
+        if (!t || t->type == JSON_NULL)
+            continue;
+        if ((ret = expect(c, t, JSON_NUMBER, path)) < 0)
+            return ret;
+        if (t->number < 0)
+            return bad(c, path, "must be >= 0 (seconds)");
+        *dst[i] = t->number;
+    }
+    return 0;
+}
+
 int job_from_json(const char *text, ConvJob **out, char *err, size_t errlen)
 {
     Ctx c = { err, errlen };
@@ -323,7 +349,8 @@ int job_from_json(const char *text, ConvJob **out, char *err, size_t errlen)
         (ret = get_bool(&c, root, "overwrite", &job->overwrite)) < 0 ||
         (ret = get_bool(&c, root, "keep_partial", &job->keep_partial)) < 0 ||
         (ret = get_bool(&c, root, "copy_metadata", &job->copy_metadata)) < 0 ||
-        (ret = get_bool(&c, root, "copy_chapters", &job->copy_chapters)) < 0)
+        (ret = get_bool(&c, root, "copy_chapters", &job->copy_chapters)) < 0 ||
+        (ret = get_trim(&c, json_get(root, "trim"), job)) < 0)
         goto end;
 
     streams = json_get(root, "streams");
@@ -411,6 +438,18 @@ void job_to_json(const ConvJob *job, AVBPrint *bp)
                    "\n  \"copy_metadata\": %s,\n  \"copy_chapters\": %s",
                job->overwrite ? "true" : "false", job->keep_partial ? "true" : "false",
                job->copy_metadata ? "true" : "false", job->copy_chapters ? "true" : "false");
+    if (job->trim_start > 0 || job->trim_end > 0) {
+        char s[32], e[32];
+        /* %g through a buffer: never a locale's decimal comma in JSON */
+        snprintf(s, sizeof(s), "%.6g", job->trim_start);
+        snprintf(e, sizeof(e), "%.6g", job->trim_end);
+        for (char *p = s; *p; p++) if (*p == ',') *p = '.';
+        for (char *p = e; *p; p++) if (*p == ',') *p = '.';
+        av_bprintf(bp, ",\n  \"trim\": { \"start\": %s", s);
+        if (job->trim_end > 0)
+            av_bprintf(bp, ", \"end\": %s", e);
+        av_bprintf(bp, " }");
+    }
     if (av_dict_count(job->metadata))
         write_dict(bp, "metadata", job->metadata, "  ");
 

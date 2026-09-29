@@ -1,0 +1,1 @@
+{ "input": "tests/media/m3_in.mkv", "output": "build/o_trim.mkv", "overwrite": true, "trim": { "start": 3.2, "end": 6.5 }, "streams": [ { "input": 0, "action": "transcode", "encoder": "libx264", "options": { "preset": "ultrafast" } }, { "input": 1, "action": "transcode", "encoder": "aac" }, { "input": 2, "action": "copy" } ] }

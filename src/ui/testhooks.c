@@ -20,6 +20,9 @@
  *                                     greyed state
  *   FFCONV_TEST_POPUP=container|action<N>|encoder<N>
  *   FFCONV_TEST_POPUP_SHOT=<png>      open that list, save it, and quit
+ *   FFCONV_TEST_PREVIEW=<seconds>     open the preview at that time and, once
+ *   FFCONV_TEST_PREVIEW_SHOT=<png>    rendered, save it, and quit
+ *   FFCONV_TEST_PREVIEW_ZOOM=1        ... with "Actual pixels" on
  *   FFCONV_TEST_CONVERT=1             press Convert, and quit when done
  *   FFCONV_TEST_JOB_JSON=<file>       write the job Convert runs, as JSON
  *   FFCONV_TEST_EXPAND_LOG=1          open the FFmpeg log in the progress window
@@ -40,6 +43,7 @@
 #include "choice_item.h"
 #include "job.h"
 #include "option_editor.h"
+#include "preview_window.h"
 #include "progress.h"
 #include "stream_row.h"
 #include "window.h"
@@ -284,6 +288,40 @@ static gboolean popup_shot(gpointer data)
 }
 
 /* ------------------------------------------------------------------------- */
+/* preview                                                                   */
+
+static gboolean preview_shot(gpointer data)
+{
+    save_snapshot(GTK_WIDGET(data), env("FFCONV_TEST_PREVIEW_SHOT"));
+    g_object_unref(data);
+    quit_soon();
+    return G_SOURCE_REMOVE;
+}
+
+static void on_preview_rendered(GtkWindow *win, gboolean ok, void *user)
+{
+    preview_window_set_listener(win, NULL, NULL);        /* the first result only */
+    g_timeout_add(300, preview_shot, g_object_ref(win));  /* after it is drawn */
+}
+
+static const PreviewWindowListener preview_listener = { .rendered = on_preview_rendered };
+
+static void open_preview(const char *seconds)
+{
+    GtkWindow *win = conv_window_open_preview(g_driver.w);
+
+    if (!win) {
+        g_printerr("test: no preview\n");
+        quit_soon();
+        return;
+    }
+    if (env("FFCONV_TEST_PREVIEW_ZOOM"))
+        preview_window_set_actual_pixels(win, TRUE);
+    preview_window_set_time(win, g_ascii_strtod(seconds, NULL));   /* renders */
+    preview_window_set_listener(win, &preview_listener, NULL);
+}
+
+/* ------------------------------------------------------------------------- */
 /* the steps                                                                 */
 
 static gboolean step(gpointer data)
@@ -325,7 +363,9 @@ static gboolean step(gpointer data)
     if (env("FFCONV_TEST_STATES_FILE"))
         write_states(env("FFCONV_TEST_STATES_FILE"));
 
-    if (env("FFCONV_TEST_POPUP")) {
+    if (env("FFCONV_TEST_PREVIEW")) {
+        open_preview(env("FFCONV_TEST_PREVIEW"));
+    } else if (env("FFCONV_TEST_POPUP")) {
         GtkWidget *dd = popup_dropdown(env("FFCONV_TEST_POPUP"));
         if (dd) {
             g_signal_emit_by_name(dd, "activate");   /* pops the list up */
@@ -430,7 +470,7 @@ static gboolean attach(gpointer data)
 
     if (w && !g_driver.w) {   /* the first main window only (not dialogs) */
         g_driver.w = w;
-        conv_window_set_listener(w, &window_listener, NULL);
+        conv_window_add_listener(w, &window_listener, NULL);
         if (env("FFCONV_TEST_INPUT"))
             open_input(NULL);
         else if (env("FFCONV_TEST_SHOT"))

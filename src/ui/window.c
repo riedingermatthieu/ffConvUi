@@ -20,6 +20,7 @@
 #include "job.h"
 #include "option_editor.h"
 #include "probe.h"
+#include "preview_window.h"
 #include "progress.h"
 #include "stream_row.h"
 #include "ui_util.h"
@@ -49,10 +50,11 @@ struct ConvWindow {
     GtkWidget       *issues_box;
     GtkWidget       *cmd_box, *cmd_view, *cmd_shell_dd, *cmd_copy_btn;
     guint            cmd_copied_id;
-    GtkWidget       *convert_btn;
+    GtkWidget       *convert_btn, *preview_btn;
     GtkWindow       *progress_win;
-    ConvWindowListener listener;
-    void            *listener_user;
+    GArray          *listeners;        /* ListenerEntry */
+    guint            next_listener_id;
+    GtkWindow       *preview_win;
 
     StreamRow      **rows;
     int              nb_rows;
@@ -62,6 +64,22 @@ struct ConvWindow {
     int              loading;
     int              updating;         /* programmatic widget changes: no callbacks */
 };
+
+typedef struct ListenerEntry {
+    ConvWindowListener l;
+    void              *user;
+    guint              id;
+} ListenerEntry;
+
+/* Call event `ev` of every listener; ARGS may use `le` (the entry). */
+#define EMIT(w, ev, ARGS)                                                         \
+    do {                                                                          \
+        for (guint i_ = 0; i_ < (w)->listeners->len; i_++) {                      \
+            ListenerEntry *le = &g_array_index((w)->listeners, ListenerEntry, i_); \
+            if (le->l.ev)                                                         \
+                le->l.ev ARGS;                                                    \
+        }                                                                         \
+    } while (0)
 
 static void schedule_validate(ConvWindow *w);
 static void update_container_states(ConvWindow *w);
@@ -240,6 +258,8 @@ static void add_issue_line(ConvWindow *w, const char *icon, const char *css, con
 static void update_convert_button(ConvWindow *w)
 {
     gtk_widget_set_sensitive(w->convert_btn, w->mi && !w->loading && !w->converting && !w->nb_errors);
+    /* previewing works on one stream: other streams' problems do not matter */
+    gtk_widget_set_sensitive(w->preview_btn, w->mi && !w->loading);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -359,6 +379,7 @@ static gboolean do_validate(gpointer data)
     validate_report_free(&rep);
     job_free(&job);
     update_convert_button(w);
+    EMIT(w, job_changed, (w, le->user));
     return G_SOURCE_REMOVE;
 }
 
@@ -646,8 +667,7 @@ static void on_probed(GObject *src, GAsyncResult *res, gpointer data)
     fit_stream_list(w);
     schedule_validate(w);
 
-    if (w->listener.file_loaded)
-        w->listener.file_loaded(w, w->listener_user);
+    EMIT(w, file_loaded, (w, le->user));
 }
 
 void conv_window_open(ConvWindow *w, GFile *file)
@@ -752,8 +772,7 @@ static void on_progress_finished(int ret, void *user)
     w->converting   = 0;
     w->progress_win = NULL;
     schedule_validate(w);   /* e.g. the output now exists */
-    if (w->listener.conversion_finished)
-        w->listener.conversion_finished(w, ret, w->listener_user);
+    EMIT(w, conversion_finished, (w, ret, le->user));
 }
 
 static void start_conversion(ConvWindow *w)
@@ -765,13 +784,35 @@ static void start_conversion(ConvWindow *w)
     w->converting = 1;
     update_convert_button(w);
     w->progress_win = progress_start(w->win, job, w->caps, on_progress_finished, w);
-    if (w->listener.conversion_started)   /* job: owned by the progress window now */
-        w->listener.conversion_started(w, job, w->progress_win, w->listener_user);
+    /* job: owned by the progress window now, valid until it finishes */
+    EMIT(w, conversion_started, (w, job, w->progress_win, le->user));
 }
 
 static void on_convert_clicked(GtkButton *b, gpointer data)
 {
     start_conversion(data);
+}
+
+static void on_preview_destroyed(GtkWidget *win, gpointer data)
+{
+    ((ConvWindow *)data)->preview_win = NULL;
+}
+
+GtkWindow *conv_window_open_preview(ConvWindow *w)
+{
+    if (!w->mi)
+        return NULL;
+    if (!w->preview_win) {
+        w->preview_win = preview_window_new(w);
+        g_signal_connect(w->preview_win, "destroy", G_CALLBACK(on_preview_destroyed), w);
+    }
+    gtk_window_present(w->preview_win);
+    return w->preview_win;
+}
+
+static void on_preview_clicked(GtkButton *b, gpointer data)
+{
+    conv_window_open_preview(data);
 }
 
 static gboolean on_drop(GtkDropTarget *t, const GValue *value, double x, double y, gpointer data)
@@ -809,6 +850,8 @@ static void on_destroy(GtkWidget *widget, gpointer data)
 {
     ConvWindow *w = data;
 
+    if (w->preview_win)   /* it listens to this window: close it first */
+        gtk_window_destroy(w->preview_win);
     if (w->cmd_copied_id)
         g_source_remove(w->cmd_copied_id);
     if (w->validate_id)
@@ -820,6 +863,7 @@ static void on_destroy(GtkWidget *widget, gpointer data)
     if (w->container_store)
         g_object_unref(w->container_store);
     g_hash_table_unref(w->mux_options);
+    g_array_free(w->listeners, TRUE);
     mi_free(&w->mi);
     g_free(w);
 }
@@ -836,6 +880,7 @@ ConvWindow *conv_window_new(GtkApplication *app, const Caps *caps)
     w->app  = app;
     w->caps = caps;
     w->mux_options = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, opt_box_free);
+    w->listeners   = g_array_new(FALSE, FALSE, sizeof(ListenerEntry));
     w->win  = GTK_WINDOW(gtk_application_window_new(app));
     g_object_set_data(G_OBJECT(w->win), "conv-window", w);
     gtk_window_set_title(w->win, "ffConv");
@@ -979,6 +1024,11 @@ ConvWindow *conv_window_new(GtkApplication *app, const Caps *caps)
 
     bottom = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_set_halign(bottom, GTK_ALIGN_END);
+    w->preview_btn = gtk_button_new_with_mnemonic("_Preview…");
+    gtk_widget_set_tooltip_text(w->preview_btn, "See one frame before and after conversion");
+    gtk_widget_set_sensitive(w->preview_btn, FALSE);
+    gtk_box_append(GTK_BOX(bottom), w->preview_btn);
+    g_signal_connect(w->preview_btn, "clicked", G_CALLBACK(on_preview_clicked), w);
     w->convert_btn = gtk_button_new_with_mnemonic("_Convert");
     gtk_widget_add_css_class(w->convert_btn, "suggested-action");
     gtk_widget_set_size_request(w->convert_btn, 120, -1);
@@ -1015,13 +1065,31 @@ ConvWindow *conv_window_from_window(GtkWindow *win)
     return win ? g_object_get_data(G_OBJECT(win), "conv-window") : NULL;
 }
 
-void conv_window_set_listener(ConvWindow *w, const ConvWindowListener *l, void *user)
+guint conv_window_add_listener(ConvWindow *w, const ConvWindowListener *l, void *user)
 {
-    if (l)
-        w->listener = *l;
-    else
-        memset(&w->listener, 0, sizeof(w->listener));
-    w->listener_user = user;
+    ListenerEntry le = { *l, user, ++w->next_listener_id };
+
+    g_array_append_val(w->listeners, le);
+    return le.id;
+}
+
+void conv_window_remove_listener(ConvWindow *w, guint id)
+{
+    for (guint i = 0; i < w->listeners->len; i++)
+        if (g_array_index(w->listeners, ListenerEntry, i).id == id) {
+            g_array_remove_index(w->listeners, i);
+            return;
+        }
+}
+
+ConvJob *conv_window_build_job(ConvWindow *w)
+{
+    return build_job(w);
+}
+
+const MediaInfo *conv_window_media(ConvWindow *w)
+{
+    return w->mi;
 }
 
 /* ------------------------------------------------------------------------- */

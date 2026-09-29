@@ -14,6 +14,7 @@
  *   convcli run <job.json> [--overwrite] [--quiet] [--cancel-after <seconds>]
  *   convcli validate <job.json> [--static]
  *   convcli command <job.json> [--shell bash|powershell|cmd]
+ *   convcli preview <job.json> [--time <s>] [--stream <n>] --before <png> --after <png>
  */
 #include <inttypes.h>
 #include <signal.h>
@@ -42,6 +43,7 @@
 #include "cmdline.h"
 #include "engine.h"
 #include "job.h"
+#include "preview.h"
 #include "probe.h"
 #include "validate.h"
 
@@ -74,7 +76,7 @@ static const char *arg_positional(const Args *a, int index)
 {
     static const char *const with_value[] = {
         "--for", "--type", "--muxer", "--search", "--class", "--output",
-        "--cancel-after", "--shell", NULL
+        "--cancel-after", "--shell", "--time", "--stream", "--before", "--after", NULL
     };
     int n = 0;
 
@@ -1019,6 +1021,68 @@ static int cmd_command(const Args *a)
 }
 
 /* ------------------------------------------------------------------------- */
+/* preview                                                                   */
+
+static int cmd_preview(const Args *a)
+{
+    const char *path   = arg_positional(a, 0);
+    const char *time   = arg_value(a, "--time");
+    const char *stream = arg_value(a, "--stream");
+    const char *before = arg_value(a, "--before");
+    const char *after  = arg_value(a, "--after");
+    PreviewRequest req = { 0 };
+    PreviewResult res;
+    ConvJob *job = NULL;
+    MediaInfo *mi = NULL;
+    char err[1024], scratch[1024];
+    int ret;
+
+    if (!path || !before || !after) {
+        fprintf(stderr, "usage: convcli preview <job.json> [--time <s>] [--stream <job stream>] "
+                        "--before <png> --after <png>\n");
+        return AVERROR(EINVAL);
+    }
+    if ((ret = job_load(path, &job, err, sizeof(err))) < 0) {
+        fprintf(stderr, "%s: %s\n", path, err);
+        return ret;
+    }
+    req.job  = job;
+    req.time = time ? atof(time) : 0;
+    req.stream = -1;
+    if (stream) {
+        req.stream = atoi(stream);
+    } else if (mi_probe(job->input, &mi, err, sizeof(err)) >= 0) {
+        /* the first video stream of the job */
+        for (int i = 0; i < job->nb_streams && req.stream < 0; i++)
+            if (job->streams[i].action != JOB_DROP && job->streams[i].input_index < mi->nb_streams &&
+                mi->streams[job->streams[i].input_index].type == AVMEDIA_TYPE_VIDEO)
+                req.stream = i;
+    }
+    snprintf(scratch, sizeof(scratch), "%s.preview-clip.mkv", after);
+    req.scratch = scratch;
+
+    if ((ret = preview_render(&req, NULL, &res, err, sizeof(err))) < 0) {
+        fprintf(stderr, "Error: %s\n", err);
+    } else {
+        printf("before: %.3f s, %dx%d %s (shown %dx%d)\n", res.before.time, res.before.coded_width,
+               res.before.coded_height, res.before.pix_fmt, res.before.width, res.before.height);
+        if (res.copied)
+            printf("after:  the stream is copied: identical\n");
+        else
+            printf("after:  %.3f s in the clip, %dx%d %s (shown %dx%d), %s, %.0f kb/s over %.2f s, "
+                   "encoded in %.2f s\n", res.after.time, res.after.coded_width, res.after.coded_height,
+                   res.after.pix_fmt, res.after.width, res.after.height, res.encoder, res.kbps,
+                   res.clip_seconds, res.encode_seconds);
+        if ((ret = preview_save_png(&res.before, before)) < 0 || (ret = preview_save_png(&res.after, after)) < 0)
+            fprintf(stderr, "Error: cannot write the PNG files: %s\n", av_err2str(ret));
+        preview_result_free(&res);
+    }
+    mi_free(&mi);
+    job_free(&job);
+    return ret;
+}
+
+/* ------------------------------------------------------------------------- */
 /* validate                                                                  */
 
 static int cmd_validate(const Args *a)
@@ -1124,6 +1188,7 @@ int main(int argc, char **argv)
         { "encoders", cmd_encoders }, { "actions", cmd_actions }, { "filters", cmd_filters },
         { "options", cmd_options }, { "hw", cmd_hw },         { "job-template", cmd_job_template },
         { "run", cmd_run },           { "validate", cmd_validate }, { "command", cmd_command },
+        { "preview", cmd_preview },
     };
     char **wargs = NULL;
     Args args;

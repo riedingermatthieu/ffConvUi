@@ -1,5 +1,5 @@
 # The equivalent ffmpeg command must produce the same result as the engine.
-# Usage: cmake -DCONVCLI=<exe> -DFFMPEG=<ffmpeg> -DBASH=<bash> -DJOB=<job.json> -DOUT_DIR=<dir>
+# Usage: cmake -DCONVCLI=<exe> -DFFMPEG=<ffmpeg> -DBASH=<bash> -DJOB=<job.json> -DOUT_DIR=<dir> [-DTYPES=v]
 #              -P command_test.cmake        (run from the project root)
 #
 # Runs the job with convcli, runs `convcli command --shell bash` with the real
@@ -39,7 +39,12 @@ if(NOT rc EQUAL 0)
     message(FATAL_ERROR "the ffmpeg command failed (${rc})")
 endif()
 
-foreach(type v a s)
+# TYPES: the stream types to compare (default "v;a;s")
+string(REPLACE "," ";" TYPES "${TYPES}")
+if(NOT TYPES)
+    set(TYPES v a s)
+endif()
+foreach(type ${TYPES})
     foreach(v engine cli)
         execute_process(COMMAND "${FFMPEG}" -v error -i "${out_${v}}" -map 0:${type}? -f framemd5 -
                         OUTPUT_VARIABLE md5_${v} ERROR_QUIET)

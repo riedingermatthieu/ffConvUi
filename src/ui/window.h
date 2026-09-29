@@ -31,10 +31,14 @@ typedef struct ConvWindowListener {
      * conversion_finished). */
     void (*conversion_started)(ConvWindow *w, const ConvJob *job, GtkWindow *progress, void *user);
     void (*conversion_finished)(ConvWindow *w, int ret, void *user);
+    /* The choices changed (and were checked): conv_window_build_job() gives
+     * the new job. */
+    void (*job_changed)(ConvWindow *w, void *user);
 } ConvWindowListener;
 
-/* One listener per window; NULL removes it. */
-void conv_window_set_listener(ConvWindow *w, const ConvWindowListener *l, void *user);
+/* Any number of listeners; returns an id for conv_window_remove_listener(). */
+guint conv_window_add_listener(ConvWindow *w, const ConvWindowListener *l, void *user);
+void  conv_window_remove_listener(ConvWindow *w, guint id);
 
 /* ------------------------------------------------------------------------- */
 /* What a user can do, as operations. Each goes through the same widgets and
@@ -54,5 +58,13 @@ GtkWindow  *conv_window_edit_muxer_options(ConvWindow *w, OptionEditor **editor)
 gboolean    conv_window_can_convert(ConvWindow *w);            /* Convert is enabled */
 void        conv_window_convert(ConvWindow *w);                 /* press Convert */
 char       *conv_window_command(ConvWindow *w);                 /* the command shown (g_free) */
+
+/* The job as currently chosen (job_free it), NULL before a file is open;
+ * and the input it applies to. */
+ConvJob    *conv_window_build_job(ConvWindow *w);
+const MediaInfo *conv_window_media(ConvWindow *w);
+
+/* Open (or bring up) the preview window; returns it. */
+GtkWindow  *conv_window_open_preview(ConvWindow *w);
 
 #endif /* UI_WINDOW_H */

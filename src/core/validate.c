@@ -682,6 +682,16 @@ int validate_job(const ConvJob *job, const Caps *caps, const MediaInfo *mi,
         v.mi = probed;
     }
 
+    /* trim range */
+    if (job->trim_start < 0 || job->trim_end < 0)
+        add(&v, VAL_ERROR, -1, "trim", "trim times must be >= 0");
+    else if (job->trim_end > 0 && job->trim_end <= job->trim_start)
+        add(&v, VAL_ERROR, -1, "trim", "the trim end (%.3f s) must be after its start (%.3f s)",
+            job->trim_end, job->trim_start);
+    else if (v.mi && v.mi->duration_us != AV_NOPTS_VALUE && job->trim_start >= v.mi->duration_us / 1e6)
+        add(&v, VAL_ERROR, -1, "trim", "the trim start (%.3f s) is after the end of the input (%.3f s)",
+            job->trim_start, v.mi->duration_us / 1e6);
+
     if (!job->nb_streams)
         add(&v, VAL_ERROR, -1, "streams", "the job has no streams");
     for (int i = 0; i < job->nb_streams; i++) {
