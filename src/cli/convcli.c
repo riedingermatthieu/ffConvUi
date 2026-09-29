@@ -827,18 +827,6 @@ static int cmd_hw(const Args *a)
 /* ------------------------------------------------------------------------- */
 /* job-template                                                              */
 
-/* "dir/name.mkv" + "mp4" -> "dir/name.converted.mp4" */
-static char *default_output(const char *input, const AVOutputFormat *of)
-{
-    const char *ext = of->extensions ? of->extensions : of->name;
-    const char *slash = strrchr(input, '/'), *bslash = strrchr(input, '\\');
-    const char *base = FFMAX(slash, bslash) ? FFMAX(slash, bslash) + 1 : input;
-    const char *dot = strrchr(base, '.');
-    int stem = dot && dot != base ? (int)(dot - input) : (int)strlen(input);
-
-    return av_asprintf("%.*s.converted.%.*s", stem, input, (int)strcspn(ext, ","), ext);
-}
-
 static int cmd_job_template(const Args *a)
 {
     const char *file     = arg_positional(a, 0);
@@ -865,31 +853,32 @@ static int cmd_job_template(const Args *a)
     }
 
     if (!(job = job_alloc()) || !(job->input = av_strdup(file)) ||
-        !(job->output = output ? av_strdup(output) : default_output(file, mux->fmt)) ||
+        !(job->output = output ? av_strdup(output)
+                               : job_default_output(file, mux->extensions ? mux->extensions : mux->name)) ||
         !(job->muxer = av_strdup(mux->key))) {
         ret = AVERROR(ENOMEM);
         goto end;
     }
 
-    /* per stream: copy when the container accepts it, else the first
-     * software encoder known to fit, else drop */
     for (int i = 0; i < mi->nb_streams; i++) {
         CapsStreamActions act;
-        const CapsEncoder *enc = NULL;
+        const CapsEncoder *enc;
         JobStream *js;
 
         if ((ret = caps_stream_actions(caps, mux, &mi->streams[i], 0, &act)) < 0)
             goto end;
-        for (int j = 0; !enc && j < act.nb_encoders; j++)
-            if (act.encoders[j].compat == CAPS_YES && !act.encoders[j].enc->is_hardware)
-                enc = act.encoders[j].enc;
-
-        if (act.copy == CAPS_YES)
+        switch (caps_default_action(&act, &enc)) {
+        case CAPS_DEFAULT_COPY:
             js = job_add_stream(job, i, JOB_COPY);
-        else if (enc && (js = job_add_stream(job, i, JOB_TRANSCODE)))
-            js->encoder = av_strdup(enc->name);
-        else
+            break;
+        case CAPS_DEFAULT_TRANSCODE:
+            if ((js = job_add_stream(job, i, JOB_TRANSCODE)))
+                js->encoder = av_strdup(enc->name);
+            break;
+        default:
             js = job_add_stream(job, i, JOB_DROP);
+            break;
+        }
         caps_stream_actions_free(&act);
         if (!js || (js->action == JOB_TRANSCODE && !js->encoder)) {
             ret = AVERROR(ENOMEM);

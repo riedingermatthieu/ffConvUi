@@ -85,4 +85,11 @@ void job_stream_filter_string(const JobStream *s, AVBPrint *bp);
 
 const char *job_action_name(JobAction a);
 
+/* "dir/name.mkv" + extension "mp4" -> "dir/name.converted.mp4" (av_free it).
+ * `ext` may be a comma-separated list: its first entry is used. */
+char *job_default_output(const char *input, const char *ext);
+
+/* `path` with its extension replaced by the first entry of `ext` (av_free it). */
+char *job_replace_extension(const char *path, const char *ext);
+
 #endif /* CONV_JOB_H */

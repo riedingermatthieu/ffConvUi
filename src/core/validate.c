@@ -587,7 +587,12 @@ static void dry_run(V *v)
         sub.nb_streams    = 1;
         sub.muxer_options = NULL;
         if (engine_dry_run(&sub, &header_checked, err, sizeof(err)) < 0) {
-            add(v, VAL_ERROR, i, "", "%s", err);
+            /* the sub-job's own "stream #0: " prefix would be misleading;
+             * the issue already names the stream */
+            const char *msg = err;
+            if (!strncmp(msg, "stream #0: ", 11))
+                msg += 11;
+            add(v, VAL_ERROR, i, "", "%s", msg);
             stream_errors++;
             continue;
         }

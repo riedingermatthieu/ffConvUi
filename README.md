@@ -1,9 +1,9 @@
-# ffconv: FFmpeg converter core (M1–M4)
+# ffconv: FFmpeg converter (M1–M5)
 
 A C11 library (`convcore`) that uses the FFmpeg API to describe an input file,
-list every conversion the linked FFmpeg build can do with it, and run a
-conversion, plus a headless CLI (`convcli`) to exercise it. The GTK UI comes
-later and will use the same library.
+list every conversion the linked FFmpeg build can do with it, check and run a
+conversion; a headless CLI (`convcli`); and a GTK 4 user interface (`ffconv`)
+built on the same library.
 
 | Module | Milestone | What it does |
 |---|---|---|
@@ -15,6 +15,7 @@ later and will use the same library.
 | `src/core/validate.*` | M4 | Checks a job before running it: static checks, then a dry run; reports every problem with its stream and field. |
 | `src/core/logcap.*` | M4 | Captures FFmpeg's log per thread, so errors carry FFmpeg's own reason. |
 | `src/cli/convcli.c` | M1–M4 | Test front end. |
+| `src/ui/*` | M5 | GTK 4 application: main window, stream rows, progress window, FFmpeg log view. |
 
 ## Build (Windows, MSYS2 MINGW64)
 
@@ -23,12 +24,21 @@ development files (tested with FFmpeg 8.1).
 
 ```sh
 pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja \
-                   mingw-w64-x86_64-pkgconf mingw-w64-x86_64-ffmpeg
+                   mingw-w64-x86_64-pkgconf mingw-w64-x86_64-ffmpeg mingw-w64-x86_64-gtk4
 export PATH=/c/msys64/mingw64/bin:$PATH
 cmake -S . -B build -G Ninja
 cmake --build build
 cd build && ctest
 ```
+
+The UI (`build/ffconv.exe`) is built when GTK ≥ 4.12 is found. Run it from the
+MSYS2 MINGW64 shell (it needs the FFmpeg and GTK DLLs from `mingw64/bin`):
+
+```sh
+./build/ffconv.exe [file]
+```
+
+`-DCONV_GUI_TESTS=ON` adds three UI tests (`ctest -L gui`); they open windows.
 
 The tests use the synthetic files in [tests/media](tests/media) and the jobs in
 [tests/jobs](tests/jobs); see [tests/README.md](tests/README.md) for what each
@@ -145,6 +155,30 @@ Result: 2 error(s), 1 warning(s), dry run failed - the job would fail
 * FFmpeg's own explanation is captured from its log (`logcap`) and appended
   to error messages, in validation and in `run` alike.
 
+## User interface (M5)
+
+* **Input**: *Open…* or drop a file on the window. It is probed on a worker
+  thread; the summary shows format, duration, size and stream count.
+* **Streams**: one row per input stream with its description and the actions
+  the selected container allows (Copy, Convert, Drop). *Convert* shows an
+  encoder list (best first, type to search); hardware encoders and
+  unconfirmed ("?") choices are marked. Defaults: copy when the container is
+  known to accept the stream, else the preferred software encoder, else drop.
+* **Output**: containers that can hold at least one stream (common first,
+  "keeps N of M streams" when some would be dropped). The input's own
+  container is preselected when it keeps everything, else Matroska. The file
+  name follows the container's extension until you choose another one.
+* **Live validation**: every change re-runs the static checks (250 ms after
+  the last change); errors disable *Convert*.
+* **Convert** opens the progress window, which runs the dry run and then the
+  conversion on a worker thread: progress, fps, speed, size, time left,
+  *Cancel*, the FFmpeg log, and at the end *Show in folder* or the problems
+  found.
+
+The UI can be driven without a user through `FFCONV_TEST_*` environment
+variables (open a file, pick a container and actions, convert, cancel, save
+window snapshots as PNG); see the top of [src/ui/main.c](src/ui/main.c).
+
 ## How "what is possible" is decided
 
 * **Container ↔ codec**: `avformat_query_codec()`. A result of *unknown* is
@@ -193,6 +227,13 @@ Result: 2 error(s), 1 warning(s), dry run failed - the job would fail
 
 ## Known limitations
 
+* UI: encoder/muxer options (M6) and filters (M7) cannot be edited yet;
+  conversions use each encoder's defaults. Trim, metadata editing and presets
+  are M8.
+* UI: `ffconv.exe` only runs where the MSYS2 `mingw64/bin` DLLs are found (no
+  installer or bundled DLLs yet).
+* UI: the file dialogs, drag and drop and *Show in folder* were not exercised
+  by the automated tests (they need a person or OS-level automation).
 * Constraints that FFmpeg only checks when an encoder opens (libopus rejects
   5.1(side): add `aformat=channel_layouts=5.1`) are found by the dry run, not
   by the static pass, so live feedback in the UI will not show them.

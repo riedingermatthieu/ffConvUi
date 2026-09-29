@@ -138,6 +138,16 @@ int  caps_stream_actions(const Caps *c, const CapsMuxer *m, const MediaStream *s
                          int include_experimental, CapsStreamActions *out);
 void caps_stream_actions_free(CapsStreamActions *a);
 
+/* The default choice for a stream: copy when the container is known to accept
+ * it, else the first software encoder known to fit, else drop. */
+typedef enum CapsDefault {
+    CAPS_DEFAULT_DROP,
+    CAPS_DEFAULT_COPY,
+    CAPS_DEFAULT_TRANSCODE,   /* *encoder is set */
+} CapsDefault;
+
+CapsDefault caps_default_action(const CapsStreamActions *a, const CapsEncoder **encoder);
+
 /* Filters of classes in `class_mask` that apply to `type`
  * (AVMEDIA_TYPE_UNKNOWN = any type). *out is an array of pointers; av_free() it. */
 int caps_filters_for(const Caps *c, enum AVMediaType type, unsigned class_mask,

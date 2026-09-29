@@ -10,6 +10,7 @@
 #include <libavformat/avio.h>
 #include <libavutil/avstring.h>
 #include <libavutil/error.h>
+#include <libavutil/macros.h>
 #include <libavutil/mem.h>
 
 #include "json.h"
@@ -84,6 +85,27 @@ JobFilter *job_stream_add_filter(JobStream *s, const char *name)
         return NULL;
     s->nb_filters++;
     return tmp;
+}
+
+/* length of `path` without its extension (0 if the file name has none) */
+static size_t stem_length(const char *path)
+{
+    const char *slash = strrchr(path, '/'), *bslash = strrchr(path, '\\');
+    const char *base = FFMAX(slash, bslash) ? FFMAX(slash, bslash) + 1 : path;
+    const char *dot = strrchr(base, '.');
+
+    return dot && dot != base ? (size_t)(dot - path) : strlen(path);
+}
+
+char *job_default_output(const char *input, const char *ext)
+{
+    return av_asprintf("%.*s.converted.%.*s", (int)stem_length(input), input,
+                       (int)strcspn(ext, ","), ext);
+}
+
+char *job_replace_extension(const char *path, const char *ext)
+{
+    return av_asprintf("%.*s.%.*s", (int)stem_length(path), path, (int)strcspn(ext, ","), ext);
 }
 
 const char *job_action_name(JobAction a)

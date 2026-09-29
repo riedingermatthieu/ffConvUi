@@ -604,6 +604,20 @@ int caps_stream_actions(const Caps *c, const CapsMuxer *m, const MediaStream *s,
     return 0;
 }
 
+CapsDefault caps_default_action(const CapsStreamActions *a, const CapsEncoder **encoder)
+{
+    *encoder = NULL;
+    if (a->copy == CAPS_YES)
+        return CAPS_DEFAULT_COPY;
+    for (int i = 0; i < a->nb_encoders; i++) {
+        if (a->encoders[i].compat == CAPS_YES && !a->encoders[i].enc->is_hardware) {
+            *encoder = a->encoders[i].enc;
+            return CAPS_DEFAULT_TRANSCODE;
+        }
+    }
+    return CAPS_DEFAULT_DROP;
+}
+
 void caps_stream_actions_free(CapsStreamActions *a)
 {
     if (!a)

@@ -48,6 +48,22 @@ if(WIN32)
     target_link_libraries(convcli PRIVATE shell32)
 endif()
 
+# ---- GTK 4 user interface (optional) -------------------------------------------
+pkg_check_modules(GTK4 IMPORTED_TARGET gtk4>=4.12)
+if(GTK4_FOUND)
+    add_executable(ffconv WIN32
+        src/ui/main.c
+        src/ui/window.c
+        src/ui/stream_row.c
+        src/ui/progress.c
+        src/ui/uilog.c
+        src/ui/ui_util.c)
+    target_link_libraries(ffconv PRIVATE convcore PkgConfig::GTK4)
+    target_compile_options(ffconv PRIVATE ${CONV_WARNINGS})
+else()
+    message(STATUS "gtk4 >= 4.12 not found: the ffconv UI will not be built")
+endif()
+
 # ---- smoke tests -------------------------------------------------------------
 enable_testing()
 add_test(NAME version        COMMAND convcli version)
@@ -89,6 +105,23 @@ foreach(job ${CONV_TEST_JOBS})
                  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     endif()
 endforeach()
+
+# GUI tests open real windows: opt in with -DCONV_GUI_TESTS=ON.
+option(CONV_GUI_TESTS "Run the ffconv UI tests (they open windows)" OFF)
+if(GTK4_FOUND AND CONV_GUI_TESTS)
+    add_test(NAME ui_empty
+             COMMAND ${CMAKE_COMMAND} -DFFCONV=$<TARGET_FILE:ffconv> -DOUT_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                     -DMODE=empty -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_test.cmake)
+    add_test(NAME ui_open
+             COMMAND ${CMAKE_COMMAND} -DFFCONV=$<TARGET_FILE:ffconv> -DOUT_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                     -DMODE=shot -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/media/m3_in.mkv
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_test.cmake)
+    add_test(NAME ui_convert
+             COMMAND ${CMAKE_COMMAND} -DFFCONV=$<TARGET_FILE:ffconv> -DOUT_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                     -DMODE=convert -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/media/m3_in.mkv
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_test.cmake)
+    set_tests_properties(ui_empty ui_open ui_convert PROPERTIES LABELS gui RUN_SERIAL TRUE)
+endif()
 
 # Jobs in tests/jobs/invalid must fail validation with the message in "_expect".
 file(GLOB CONV_INVALID_JOBS "${CMAKE_CURRENT_SOURCE_DIR}/tests/jobs/invalid/*.json")
