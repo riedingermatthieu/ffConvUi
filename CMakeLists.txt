@@ -58,6 +58,8 @@ if(GTK4_FOUND)
         src/ui/main.c
         src/ui/window.c
         src/ui/stream_row.c
+        src/ui/filter_chain.c
+        src/ui/filter_dialog.c
         src/ui/choice_item.c
         src/ui/preview_window.c
         src/ui/option_editor.c
@@ -205,7 +207,14 @@ if(GTK4_FOUND AND CONV_GUI_TESTS AND CONV_TEST_HOOKS)
              COMMAND ${CMAKE_COMMAND} -DFFCONV=$<TARGET_FILE:ffconv> -DOUT_DIR=${CMAKE_CURRENT_BINARY_DIR}
                      -DMODE=preview -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/media/m3_in.mkv
                      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_test.cmake)
+    foreach(mode filters filters_bad)
+        add_test(NAME ui_${mode}
+                 COMMAND ${CMAKE_COMMAND} -DFFCONV=$<TARGET_FILE:ffconv> -DOUT_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                         -DMODE=${mode} -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/media/m3_in.mkv
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_test.cmake)
+    endforeach()
     set_tests_properties(ui_empty ui_open ui_convert ui_options ui_greyed ui_fixed ui_preview
+                         ui_filters ui_filters_bad
                          PROPERTIES LABELS gui RUN_SERIAL TRUE)
 endif()
 

@@ -57,6 +57,16 @@ int  validate_job(const ConvJob *job, const Caps *caps, const MediaInfo *mi,
                   unsigned flags, ValReport *report);
 void validate_report_free(ValReport *report);
 
+/*
+ * Build `chain` (a filtergraph string, "" = none) behind a source with the
+ * stream's parameters (size, pixel format, aspect, rate / sample format,
+ * rate, layout) and configure it, without any media. Returns 0, or a
+ * negative AVERROR with FFmpeg's reason in err; *filter_index (optional) is
+ * then the position of the filter at fault in the chain, or -1.
+ */
+int  validate_filter_chain(const MediaStream *ms, const char *chain, int *filter_index,
+                           char *err, size_t errlen);
+
 const char *validate_severity_name(ValSeverity s);
 
 #endif /* CONV_VALIDATE_H */

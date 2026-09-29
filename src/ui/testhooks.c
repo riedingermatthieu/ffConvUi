@@ -12,6 +12,12 @@
  *   FFCONV_TEST_OPTIONS=0:crf=30;0:preset=fast;mux:movflags=+faststart
  *                                     set options through the option dialogs
  *   FFCONV_TEST_OPTIONS_SHOT=<png>    save the first option dialog
+ *   FFCONV_TEST_FILTERS=0:scale:w=640:h=-2;0:hflip
+ *                                     add filters (and set their options)
+ *                                     through the streams' filter dialogs
+ *   FFCONV_TEST_FILTER_TEXT=0:<text>  type filtergraph text in stream 0's dialog
+ *   FFCONV_TEST_FILTERS_SHOT=<png>    save the first filter dialog
+ *   FFCONV_TEST_FILTERS_FILE=<file>   write what the filter dialogs show
  *   FFCONV_TEST_OUTPUT=<file>         set the output (and "overwrite")
  *   FFCONV_TEST_COMMAND_FILE=<file>   write the ffmpeg command shown
  *   FFCONV_TEST_SHOT=<png>            save the main window (without INPUT:
@@ -41,6 +47,7 @@
 #include <libavutil/bprint.h>
 
 #include "choice_item.h"
+#include "filter_dialog.h"
 #include "job.h"
 #include "option_editor.h"
 #include "preview_window.h"
@@ -54,6 +61,7 @@ typedef struct Driver {
     GtkApplication *app;
     ConvWindow     *w;
     GtkWindow      *dialog;             /* option dialog being filled in */
+    GPtrArray      *filter_dialogs;     /* filter dialogs opened, in order */
     int             options_shot_taken;
     int             progress_shot_taken;
 } Driver;
@@ -215,6 +223,89 @@ static void set_options_step(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* filters                                                                   */
+
+static GtkWindow *filter_dialog_for(int stream)
+{
+    StreamRow *row = conv_window_stream(g_driver.w, stream);
+    GtkWindow *dlg = row ? stream_row_edit_filters(row) : NULL;
+
+    if (!dlg)
+        g_printerr("test: stream %d cannot be filtered\n", stream);
+    else if (!g_ptr_array_find(g_driver.filter_dialogs, dlg, NULL))
+        g_ptr_array_add(g_driver.filter_dialogs, g_object_ref(dlg));
+    return dlg;
+}
+
+static gboolean filters_done(gpointer data)
+{
+    const char *shot = env("FFCONV_TEST_FILTERS_SHOT"), *file = env("FFCONV_TEST_FILTERS_FILE");
+    GString *out = g_string_new(NULL);
+
+    for (guint i = 0; i < g_driver.filter_dialogs->len; i++) {
+        GtkWindow *dlg = g_ptr_array_index(g_driver.filter_dialogs, i);
+        char *d = filter_dialog_describe(dlg);
+        if (!i && shot)
+            save_snapshot(GTK_WIDGET(dlg), shot);
+        g_string_append_printf(out, "dialog %u\n%s", i, d);
+        g_free(d);
+        gtk_window_destroy(dlg);
+        g_object_unref(dlg);
+    }
+    g_ptr_array_set_size(g_driver.filter_dialogs, 0);
+    if (file)
+        g_file_set_contents(file, out->str, out->len, NULL);
+    g_string_free(out, TRUE);
+    next_step(STEP_DELAY_MS);
+    return G_SOURCE_REMOVE;
+}
+
+/* "0:scale:w=640:h=-2;0:hflip" and/or text "0:scale=320:-2" */
+static void filters_step(const char *spec, const char *text)
+{
+    char **items = g_strsplit(spec ? spec : "", ";", -1);
+
+    for (char **it = items; *it; it++) {
+        char **parts = g_strsplit(*it, ":", -1);
+        GtkWindow *dlg;
+        int n;
+
+        if (!parts[0] || !parts[1] || !(dlg = filter_dialog_for(atoi(parts[0])))) {
+            g_strfreev(parts);
+            continue;
+        }
+        if (!filter_dialog_add(dlg, parts[1])) {
+            g_printerr("test: no filter %s\n", parts[1]);
+        } else if (parts[2]) {
+            OptionEditor *ed = NULL;
+            GtkWindow *ow;
+            n = filter_chain_length(stream_row_filters(conv_window_stream(g_driver.w, atoi(parts[0])))) - 1;
+            if ((ow = filter_dialog_edit_options(dlg, n, &ed))) {
+                for (int k = 2; parts[k]; k++) {
+                    char *eq = strchr(parts[k], '=');
+                    if (!eq)
+                        continue;
+                    *eq = 0;
+                    if (!option_editor_set_text(ed, parts[k], eq + 1))
+                        g_printerr("test: cannot set %s=%s\n", parts[k], eq + 1);
+                }
+                gtk_window_destroy(ow);
+            }
+        }
+        g_strfreev(parts);
+    }
+    g_strfreev(items);
+
+    if (text) {
+        const char *colon = strchr(text, ':');
+        GtkWindow *dlg = colon ? filter_dialog_for(atoi(text)) : NULL;
+        if (dlg)
+            filter_dialog_set_text(dlg, colon + 1);
+    }
+    g_timeout_add(STEP_DELAY_MS, filters_done, NULL);
+}
+
+/* ------------------------------------------------------------------------- */
 /* checks: dropdown states, popups                                           */
 
 /* One line per entry: "<list> <on|off> <label> | <reason>" */
@@ -344,6 +435,13 @@ static gboolean step(gpointer data)
     }
     if (env("FFCONV_TEST_OPTIONS")) {        /* one dialog per step */
         set_options_step();
+        return G_SOURCE_REMOVE;
+    }
+    if (env("FFCONV_TEST_FILTERS") || env("FFCONV_TEST_FILTER_TEXT")) {
+        char *spec = take("FFCONV_TEST_FILTERS"), *text = take("FFCONV_TEST_FILTER_TEXT");
+        filters_step(spec, text);
+        g_free(spec);
+        g_free(text);
         return G_SOURCE_REMOVE;
     }
     if ((v = take("FFCONV_TEST_OUTPUT"))) {
@@ -497,5 +595,6 @@ void testhooks_install(GtkApplication *app)
     if (!any)
         return;   /* a normal run */
     g_driver.app = app;
+    g_driver.filter_dialogs = g_ptr_array_new();
     g_signal_connect(app, "window-added", G_CALLBACK(on_window_added), NULL);
 }

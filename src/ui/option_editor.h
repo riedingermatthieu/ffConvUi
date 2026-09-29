@@ -1,7 +1,7 @@
 /*
  * option_editor.h - option editor generated from FFmpeg's AVOption metadata.
  *
- * Works for any encoder or muxer: no option is hard-coded except the short
+ * Works for any encoder, muxer or filter: no option is hard-coded except the short
  * "Common" list and the Quality control (the ffmpeg CLI's -q, which is not
  * an option: it sets global_quality and the qscale flag).
  *
@@ -13,6 +13,7 @@
 
 #include <gtk/gtk.h>
 #include <libavcodec/avcodec.h>
+#include <libavfilter/avfilter.h>
 #include <libavformat/avformat.h>
 #include <libavutil/dict.h>
 
@@ -20,11 +21,12 @@ typedef struct OptionEditor OptionEditor;
 
 typedef void (*OptionsChanged)(void *user);
 
-/* Exactly one of codec / muxer is set. */
+/* Exactly one of codec / muxer / filter is set. */
 typedef struct OptionTarget {
     const AVCodec        *codec;
     const AVOutputFormat *muxer;
     const char           *muxer_key;   /* display name for a muxer ("matroska:mka") */
+    const AVFilter       *filter;
 } OptionTarget;
 
 /* Open the editor in a modal window. `values` is edited in place (live) and

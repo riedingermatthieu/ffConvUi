@@ -1,1 +1,1 @@
-{ "_expect": "cannot configure filters \"fps=fps=fast\"", "input": "tests/media/m3_in.mkv", "output": "build/v.mp4", "overwrite": true, "streams": [ { "input": 0, "action": "transcode", "encoder": "libx264", "filters": [ { "name": "fps", "options": { "fps": "fast" } } ] } ] }
+{ "_expect": "Undefined constant or missing .[(]. in .fast.", "input": "tests/media/m3_in.mkv", "output": "build/v.mp4", "overwrite": true, "streams": [ { "input": 0, "action": "transcode", "encoder": "libx264", "filters": [ { "name": "fps", "options": { "fps": "fast" } } ] } ] }

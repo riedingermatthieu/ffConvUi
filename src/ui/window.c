@@ -224,6 +224,8 @@ static ConvJob *build_job(ConvWindow *w)
         if (a == JOB_TRANSCODE && (!(js->encoder = av_strdup(stream_row_encoder(w->rows[i]) ? stream_row_encoder(w->rows[i]) : "")) ||
                                    av_dict_copy(&js->encoder_options, stream_row_options(w->rows[i]), 0) < 0))
             goto fail;
+        if (stream_row_filterable(w->rows[i]) && filter_chain_to_job(stream_row_filters(w->rows[i]), js) < 0)
+            goto fail;
     }
     return job;
 
@@ -406,6 +408,7 @@ static void rebuild_rows(ConvWindow *w)
     int *prev_action = g_new0(int, nb ? nb : 1);
     char **prev_encoder = g_new0(char *, nb ? nb : 1);
     GHashTable **prev_options = g_new0(GHashTable *, nb ? nb : 1);
+    FilterChain **prev_filters = g_new0(FilterChain *, nb ? nb : 1);
 
     /* keep the user's choices where the new container allows them */
     for (int i = 0; i < nb; i++)
@@ -416,6 +419,7 @@ static void rebuild_rows(ConvWindow *w)
             prev_action[idx]  = stream_row_action(w->rows[i]);
             prev_encoder[idx] = g_strdup(stream_row_encoder(w->rows[i]));
             prev_options[idx] = stream_row_take_options(w->rows[i]);
+            prev_filters[idx] = stream_row_take_filters(w->rows[i]);
         }
     }
 
@@ -430,10 +434,11 @@ static void rebuild_rows(ConvWindow *w)
         w->rows = g_new0(StreamRow *, nb ? nb : 1);
         for (int i = 0; i < nb; i++) {
             StreamRow *row = stream_row_new(w->caps, w->mux, &w->mi->streams[i], prev_options[i],
-                                            prev_action[i], prev_encoder[i], on_row_changed, w);
+                                            prev_filters[i], prev_action[i], prev_encoder[i], on_row_changed, w);
             GtkWidget *lbrow;
 
             prev_options[i] = NULL;   /* taken over by the new row */
+            prev_filters[i] = NULL;
             w->rows[w->nb_rows++] = row;
             gtk_list_box_append(GTK_LIST_BOX(w->stream_list), stream_row_widget(row));
             lbrow = gtk_widget_get_parent(stream_row_widget(row));
@@ -444,8 +449,10 @@ static void rebuild_rows(ConvWindow *w)
         g_free(prev_encoder[i]);
         if (prev_options[i])
             g_hash_table_unref(prev_options[i]);
+        filter_chain_unref(prev_filters[i]);
     }
     g_free(prev_options);
+    g_free(prev_filters);
     g_free(prev_encoder);
     g_free(prev_action);
 }

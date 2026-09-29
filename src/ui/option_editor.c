@@ -4,8 +4,8 @@
  * One row per option: name, help, a widget chosen from the option's type
  * (spin button, dropdown, flag checkboxes or text entry) and a reset button.
  * Values are written to the caller's dictionary only when changed, and
- * checked on a scratch encoder/muxer context so bad values are flagged at
- * once with FFmpeg's reason.
+ * checked on a scratch encoder/muxer/filter context so bad values are
+ * flagged at once with FFmpeg's reason.
  */
 #include "option_editor.h"
 
@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <libavfilter/avfilter.h>
 #include <libavutil/avstring.h>
 #include <libavutil/avutil.h>
 #include <libavutil/error.h>
@@ -21,6 +22,8 @@
 #include "avopt_schema.h"
 
 enum { SEC_COMMON, SEC_PRIVATE, SEC_GENERAL, NB_SECTIONS };
+
+typedef enum TargetKind { T_CODEC, T_MUXER, T_FILTER } TargetKind;
 
 /* generic options worth showing first */
 static const char *const common_video[] = {
@@ -51,7 +54,9 @@ typedef struct OptRow {
 struct OptionEditor {
     OptSchemaList   lists[2];    /* [0] private (with child classes), [1] generic */
     AVDictionary  **values;
-    void           *check_obj;   /* AVCodecContext* or AVFormatContext* */
+    void           *check_obj;   /* AVCodecContext*, AVFormatContext* or AVFilterContext* */
+    AVFilterGraph  *check_graph; /* owns the scratch AVFilterContext */
+    TargetKind      kind;
     int             is_codec;
     GtkWindow      *win;
     GtkWidget      *root, *search;
@@ -85,8 +90,9 @@ static OptWidget row_widget(const OptRow *r)
 }
 
 /* The object that receives option `name`, as FFmpeg applies a dictionary:
- * avcodec_open2() sets private options first, avformat_write_header()
- * generic ones first. *children is set when child classes must be searched. */
+ * avcodec_open2() and filters set private options first,
+ * avformat_write_header() generic ones first. *children is set when child
+ * classes must be searched. */
 static void *target_obj(OptionEditor *ed, const char *name, int *children)
 {
     void *obj = ed->check_obj, *priv;
@@ -95,10 +101,12 @@ static void *target_obj(OptionEditor *ed, const char *name, int *children)
     *children = 0;
     if (!obj)
         return NULL;
-    priv    = ed->is_codec ? ((AVCodecContext *)obj)->priv_data : ((AVFormatContext *)obj)->priv_data;
+    priv    = ed->kind == T_CODEC  ? ((AVCodecContext *)obj)->priv_data
+            : ed->kind == T_FILTER ? ((AVFilterContext *)obj)->priv
+                                   : ((AVFormatContext *)obj)->priv_data;
     in_priv = priv && av_opt_find(priv, name, NULL, 0, AV_OPT_SEARCH_CHILDREN);
     in_gen  = av_opt_find(obj, name, NULL, 0, 0) != NULL;
-    if (in_priv && (ed->is_codec || !in_gen)) {
+    if (in_priv && (ed->kind != T_MUXER || !in_gen)) {
         *children = 1;
         return priv;
     }
@@ -594,8 +602,17 @@ gboolean option_editor_set_text(OptionEditor *ed, const char *name, const char *
         quality_changed(r);
         return TRUE;
     }
-    if (!(r = find_row(ed, name)))
-        return FALSE;
+    if (!(r = find_row(ed, name))) {
+        /* an alias ("w" for crop's out_w) is shown as the option it writes */
+        for (int l = 0; l < 2 && !r; l++)
+            for (int i = 0; i < ed->lists[l].nb_opts && !r; i++)
+                if (ed->lists[l].opts[i].alias_of && !strcmp(ed->lists[l].opts[i].name, name))
+                    r = find_row(ed, ed->lists[l].opts[i].alias_of);
+        if (!r)
+            return FALSE;
+        if (ed->values && strcmp(r->s->name, name))
+            av_dict_set(ed->values, name, NULL, 0);   /* one key for the field */
+    }
 
     ed->suppress = 1;
     switch (row_widget(r)) {
@@ -708,8 +725,17 @@ static OptionEditor *editor_new(OptionTarget t, AVDictionary **values, OptionsCh
     ed->user     = user;
     ed->rows     = g_ptr_array_new();
     ed->is_codec = t.codec != NULL;
+    ed->kind     = t.codec ? T_CODEC : t.filter ? T_FILTER : T_MUXER;
 
-    if (t.codec) {
+    if (t.filter) {
+        /* the filter's own options, and the timeline (`enable`) when it has one */
+        optschema_from_class(t.filter->priv_class, 0, 1, &ed->lists[0]);
+        if (t.filter->flags & AVFILTER_FLAG_SUPPORT_TIMELINE)
+            optschema_from_class(avfilter_get_class(), AV_OPT_FLAG_FILTERING_PARAM, 0, &ed->lists[1]);
+        if ((ed->check_graph = avfilter_graph_alloc()))
+            ed->check_obj = avfilter_graph_alloc_filter(ed->check_graph, t.filter, "check");
+        g_snprintf(title, sizeof(title), "%s options", t.filter->name);
+    } else if (t.codec) {
         media_flag = t.codec->type == AVMEDIA_TYPE_VIDEO    ? AV_OPT_FLAG_VIDEO_PARAM
                    : t.codec->type == AVMEDIA_TYPE_AUDIO    ? AV_OPT_FLAG_AUDIO_PARAM
                    : t.codec->type == AVMEDIA_TYPE_SUBTITLE ? AV_OPT_FLAG_SUBTITLE_PARAM : 0;
@@ -744,13 +770,14 @@ static OptionEditor *editor_new(OptionTarget t, AVDictionary **values, OptionsCh
 
     add_section(ed, box, SEC_COMMON, "Common");
     add_section(ed, box, SEC_PRIVATE, title);
-    add_section(ed, box, SEC_GENERAL, t.codec ? "Other general encoding options" : "General muxing options");
+    add_section(ed, box, SEC_GENERAL, t.codec ? "Other general encoding options"
+                                    : t.filter ? "Timeline" : "General muxing options");
 
     /* A name in both lists (x264's "profile" and the generic "profile") is one
      * dictionary key; show only the option FFmpeg gives it to: the private
      * one for encoders, the generic one for muxers (see target_obj). */
-#define SHADOWED_GENERIC(name) (t.codec && schema_has(&ed->lists[0], name))
-#define SHADOWED_PRIVATE(name) (!t.codec && schema_has(&ed->lists[1], name))
+#define SHADOWED_GENERIC(name) (ed->kind != T_MUXER && schema_has(&ed->lists[0], name))
+#define SHADOWED_PRIVATE(name) (ed->kind == T_MUXER && schema_has(&ed->lists[1], name))
 
     /* Common: curated generic options, in the list's order, then Quality */
     for (int c = 0; common && common[c]; c++)
@@ -767,8 +794,10 @@ static OptionEditor *editor_new(OptionTarget t, AVDictionary **values, OptionsCh
     for (int i = 0; i < ed->lists[1].nb_opts; i++) {
         const OptSchema *s = &ed->lists[1].opts[i];
         if (s->alias_of || in_list(common, s->name) || SHADOWED_GENERIC(s->name) ||
-            (t.codec && !strcmp(s->name, "global_quality")))
-            continue;   /* global_quality belongs to the Quality control */
+            (t.codec && !strcmp(s->name, "global_quality")) ||
+            (t.filter && strcmp(s->name, "enable")))
+            continue;   /* global_quality belongs to the Quality control; of the
+                           generic filter options only `enable` is the user's */
         add_option_row(ed, s, SEC_GENERAL);
     }
 #undef SHADOWED_GENERIC
@@ -808,9 +837,11 @@ static void editor_free(OptionEditor *ed)
     g_ptr_array_free(ed->rows, TRUE);
     optschema_free(&ed->lists[0]);
     optschema_free(&ed->lists[1]);
-    if (ed->is_codec) {
+    if (ed->kind == T_CODEC) {
         AVCodecContext *c = ed->check_obj;
         avcodec_free_context(&c);
+    } else if (ed->kind == T_FILTER) {
+        avfilter_graph_free(&ed->check_graph);   /* frees the filter too */
     } else {
         avformat_free_context(ed->check_obj);
     }
@@ -853,6 +884,9 @@ GtkWindow *option_dialog_show(GtkWindow *parent, OptionTarget target, AVDictiona
     if (target.codec)
         g_snprintf(title, sizeof(title), "%s — %s", target.codec->name,
                    target.codec->long_name ? target.codec->long_name : "");
+    else if (target.filter)
+        g_snprintf(title, sizeof(title), "%s — %s", target.filter->name,
+                   target.filter->description ? target.filter->description : "");
     else
         g_snprintf(title, sizeof(title), "%s muxer", target.muxer_key ? target.muxer_key : target.muxer->name);
     gtk_window_set_title(win, title);

@@ -1,5 +1,7 @@
 # GUI test: run ffconv with its FFCONV_TEST_* hooks and check what it produced.
-# Usage: cmake -DFFCONV=<exe> -DOUT_DIR=<dir> -DMODE=<empty|shot|convert|options> [-DINPUT=<file>]
+# Usage: cmake -DFFCONV=<exe> -DOUT_DIR=<dir>
+#              -DMODE=<empty|shot|convert|options|greyed|fixed|preview|filters|filters_bad>
+#              [-DINPUT=<file>]
 #              -P ui_test.cmake
 # (opens real windows: only registered when CONV_GUI_TESTS is ON)
 
@@ -10,7 +12,7 @@ if(INPUT)
     set(ENV{FFCONV_TEST_INPUT} "${INPUT}")
 endif()
 
-if(MODE STREQUAL "convert" OR MODE STREQUAL "options")
+if(MODE STREQUAL "convert" OR MODE STREQUAL "options" OR MODE STREQUAL "filters")
     set(out "${OUT_DIR}/ui_test_${MODE}.mp4")
     set(done "${OUT_DIR}/ui_test_${MODE}_done.png")
     set(json "${OUT_DIR}/ui_test_${MODE}.json")
@@ -26,6 +28,27 @@ if(MODE STREQUAL "options")
     # set through the option dialogs' widgets, as a user would
     set(ENV{FFCONV_TEST_OPTIONS} "0:crf=30;0:preset=veryfast;0:bf=2;0:profile=main;1:b=96k;mux:movflags=+faststart")
     set(ENV{FFCONV_TEST_OPTIONS_SHOT} "${OUT_DIR}/ui_test_options_dialog.png")
+endif()
+
+if(MODE STREQUAL "filters" OR MODE STREQUAL "filters_bad")
+    # through the filter dialogs: a list for the video, text for the audio
+    set(ffile "${OUT_DIR}/ui_test_${MODE}_filters.txt")
+    set(states "${OUT_DIR}/ui_test_${MODE}_states.txt")
+    file(REMOVE "${ffile}" "${states}")
+    set(ENV{FFCONV_TEST_CONTAINER} "mp4")
+    set(ENV{FFCONV_TEST_STREAMS} "0=libx264,1=aac,2=mov_text")
+    set(ENV{FFCONV_TEST_OPTIONS} "0:preset=ultrafast")
+    set(ENV{FFCONV_TEST_FILTERS_SHOT} "${OUT_DIR}/ui_test_${MODE}_dialog.png")
+    set(ENV{FFCONV_TEST_FILTERS_FILE} "${ffile}")
+    set(ENV{FFCONV_TEST_STATES_FILE} "${states}")
+    if(MODE STREQUAL "filters")
+        set(ENV{FFCONV_TEST_FILTERS} "0:scale:w=640:h=-2;0:hflip")
+        set(ENV{FFCONV_TEST_FILTER_TEXT} "1:volume=0.5,aresample=44100")
+    else()
+        # crop wider than the scaled picture: refused when the chain is set up
+        set(ENV{FFCONV_TEST_FILTERS} "0:scale:w=640:h=-2;0:hflip;0:crop:w=4000")
+        set(ENV{FFCONV_TEST_OUTPUT} "${OUT_DIR}/ui_test_${MODE}.mp4")
+    endif()
 endif()
 
 if(MODE STREQUAL "greyed" OR MODE STREQUAL "fixed")
@@ -61,7 +84,7 @@ endif()
 if(NOT EXISTS "${shot}")
     message(FATAL_ERROR "no window snapshot was written")
 endif()
-if(MODE STREQUAL "convert" OR MODE STREQUAL "options")
+if(MODE STREQUAL "convert" OR MODE STREQUAL "options" OR MODE STREQUAL "filters")
     if(NOT EXISTS "${done}")
         message(FATAL_ERROR "the conversion did not finish")
     endif()
@@ -69,6 +92,26 @@ if(MODE STREQUAL "convert" OR MODE STREQUAL "options")
     if(size LESS 100000)
         message(FATAL_ERROR "output is missing or too small (${size} bytes)")
     endif()
+endif()
+function(expect_lines file)
+    file(READ "${file}" got)
+    foreach(line ${ARGN})
+        string(FIND "${got}" "${line}" pos)
+        if(pos LESS 0)
+            message(FATAL_ERROR "expected \"${line}\" in ${file}:\n${got}")
+        endif()
+    endforeach()
+endfunction()
+if(MODE STREQUAL "filters")
+    expect_lines("${ffile}" "#0 scale on ok" "#1 hflip on ok" "text scale=w=640:h=-2,hflip"
+                 "text (custom) volume=0.5,aresample=44100" "chain ok")
+    expect_lines("${states}" "convert enabled")
+    expect_lines("${json}" [["name": "scale"]] [["w": "640"]] [["name": "hflip"]]
+                 [["filters": "volume=0.5,aresample=44100"]])
+endif()
+if(MODE STREQUAL "filters_bad")
+    expect_lines("${ffile}" "#0 scale on ok" "#1 hflip on ok" "#2 crop on error: Invalid too big" "chain error: crop: Invalid too big")
+    expect_lines("${states}" "convert disabled")
 endif()
 if(MODE STREQUAL "greyed" OR MODE STREQUAL "fixed")
     file(READ "${states}" got)

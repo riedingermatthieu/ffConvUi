@@ -17,7 +17,7 @@ built on the same library.
 | `src/core/cmdline.*` | — | The `ffmpeg` command line equivalent to a job, quoted for Bash, PowerShell or cmd. |
 | `src/core/preview.*` | M10 | One video frame before and after conversion (a short clip converted by the engine, then decoded). |
 | `src/cli/convcli.c` | M1–M4 | Test front end. |
-| `src/ui/*` | M5–M6 | GTK 4 application: main window, stream rows, option editor, progress window, FFmpeg log view. |
+| `src/ui/*` | M5–M7, M10 | GTK 4 application: main window, stream rows, option editor, filter editor, preview, progress window, FFmpeg log view. |
 
 ## Build (Windows, MSYS2 MINGW64)
 
@@ -40,7 +40,7 @@ MSYS2 MINGW64 shell (it needs the FFmpeg and GTK DLLs from `mingw64/bin`):
 ./build/ffconv.exe [file]
 ```
 
-`-DCONV_GUI_TESTS=ON` adds six UI tests (`ctest -L gui`); they open windows.
+`-DCONV_GUI_TESTS=ON` adds nine UI tests (`ctest -L gui`, among them `ui_filters` and `ui_filters_bad` for the filter editor); they open windows.
 
 The tests use the synthetic files in [tests/media](tests/media) and the jobs in
 [tests/jobs](tests/jobs); see [tests/README.md](tests/README.md) for what each
@@ -181,6 +181,37 @@ audio is the same signal, cut 93 samples (1.9 ms) apart, because the
 source's AC3 timestamps are in milliseconds and the two programs smooth them
 differently after the seek. Copied subtitles differ on purpose: `ffmpeg`
 keeps events that end before the start, which then shifts the whole file.
+
+## Filter editor (M7)
+
+*Filters* next to a converted audio or video stream opens the stream's filter
+chain (the button shows how many filters are on). The window is not modal:
+the main window and the preview stay usable, and follow every change.
+
+* **Add**: a searchable list of every filter for the stream's media type.
+  Filters that cannot go in a stream's chain (several inputs or outputs,
+  hardware frames, media type changes, the other media type) are greyed out
+  with the reason, listed after the usable ones, and can still be added: the
+  check below then says what is wrong and Convert stays disabled.
+* **Chain**: one row per filter, in order, with its options (`w=640:h=-2`),
+  ↑ / ↓ to reorder, a switch to try the chain without a filter, *Options…*,
+  and ✕ to remove it.
+* **Options…** opens the option editor generated from the filter's own
+  options (plus `enable`, the timeline, for filters that support it). Values
+  are checked on a scratch filter as you type. Aliases (`w` for crop's
+  `out_w`) are shown as the option they set.
+* **Filtergraph**: the text the chain gives, escaped as FFmpeg expects. It can
+  be edited directly: the chain is then that text (the list is greyed out;
+  *Back to the list* drops the text).
+* **Checked at every change**: the chain is set up behind a source with the
+  stream's real parameters (size, pixel format, aspect, frame rate / sample
+  format, rate, layout), without decoding anything. An error is shown on the
+  filter at fault, with FFmpeg's reason (`crop`: "Invalid too big or non
+  positive size for width '4000' or height '360'"). Validation does the same
+  for jobs (`validate_filter_chain()`), so values only evaluated when the
+  graph is configured (`fps=fast`) are caught without a dry run.
+* Chains are kept per stream when the container changes, and are part of the
+  job, the ffmpeg command (`-filter:v:0 ...`) and the preview.
 
 ## Preview (M10)
 
@@ -371,8 +402,10 @@ its removal of stale Matroska statistics tags on re-encoded streams.
 
 ## Known limitations
 
-* UI: filters cannot be edited yet (M7). Trim (supported by the engine and
-  job files), metadata editing and presets have no UI yet (M8).
+* UI: trim (supported by the engine and job files), metadata editing and
+  presets have no UI yet (M8). Subtitles cannot be filtered.
+* Filter editor: the chain check uses the stream's parameters as probed; a
+  file whose format changes mid-stream is only checked by the dry run.
 * Preview: the result comes from a 1.5 s clip, so rate control (and the
   bitrate shown) can differ a little from the whole-file conversion. Video
   only: no audio preview yet.
@@ -383,8 +416,6 @@ its removal of stale Matroska statistics tags on re-encoded streams.
 * Constraints that FFmpeg only checks when an encoder opens (libopus rejects
   5.1(side): add `aformat=channel_layouts=5.1`) are found by the dry run, not
   by the static pass, so live feedback in the UI will not show them.
-* Filter option values evaluated at configuration time (e.g. `fps=fast`) are
-  likewise only caught by the dry run.
 * Muxers that write their own files (image2, hls, segment...) are not dry-run.
 * Log messages from codecs' internal threads are not captured; libraries that
   print directly to the console (x264/x265/SVT-AV1) are neither captured nor

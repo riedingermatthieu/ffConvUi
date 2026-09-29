@@ -9,6 +9,7 @@
 #include <gtk/gtk.h>
 
 #include "caps.h"
+#include "filter_chain.h"
 #include "job.h"
 #include "option_editor.h"
 #include "probe.h"
@@ -19,10 +20,12 @@ typedef void (*StreamRowChanged)(void *user);
 
 /* options: encoder options from the stream's previous row (taken over, see
  * stream_row_take_options), or NULL.
+ * filters: the stream's filter chain from the previous row (taken over, see
+ * stream_row_take_filters), or NULL for none.
  * prev_action / prev_encoder: the user's previous choice for this stream
  * (kept when the container still allows it), or -1 / NULL for the default. */
 StreamRow *stream_row_new(const Caps *caps, const CapsMuxer *mux, const MediaStream *ms,
-                          GHashTable *options,
+                          GHashTable *options, FilterChain *filters,
                           int prev_action, const char *prev_encoder,
                           StreamRowChanged changed, void *user);
 void       stream_row_free(StreamRow *row);
@@ -33,6 +36,14 @@ const AVDictionary *stream_row_options(const StreamRow *row);
 GHashTable *stream_row_take_options(StreamRow *row);
 /* Open the option editor for the selected encoder. */
 GtkWindow  *stream_row_edit_options(StreamRow *row, OptionEditor **editor);
+
+/* The stream's filter chain (used when transcoding audio or video). */
+FilterChain *stream_row_filters(const StreamRow *row);
+FilterChain *stream_row_take_filters(StreamRow *row);
+/* Open the filter editor; NULL if the stream cannot be filtered as chosen. */
+GtkWindow   *stream_row_edit_filters(StreamRow *row);
+/* The chain applies: audio/video being converted. */
+gboolean     stream_row_filterable(const StreamRow *row);
 
 GtkWidget   *stream_row_widget(const StreamRow *row);
 /* The action and encoder dropdowns (test hooks). */

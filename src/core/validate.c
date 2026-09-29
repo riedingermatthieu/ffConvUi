@@ -5,11 +5,15 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avstring.h>
+#include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
 
 #include "engine.h"
@@ -431,6 +435,102 @@ end:
     avfilter_graph_free(&graph);
 }
 
+/* Which filter of a parsed chain a log message is about: FFmpeg names them
+ * "Parsed_<filter>_<position>". -1 if the message names none. */
+static int parsed_filter_index(const char *msg)
+{
+    const char *p = strstr(msg, "Parsed_"), *colon;
+
+    if (!p || !(colon = strchr(p, ':')))
+        return -1;
+    for (const char *q = colon - 1; q > p; q--)
+        if (*q == '_')
+            return atoi(q + 1);
+    return -1;
+}
+
+int validate_filter_chain(const MediaStream *ms, const char *chain, int *filter_index,
+                          char *err, size_t errlen)
+{
+    const int video = ms->type == AVMEDIA_TYPE_VIDEO;
+    AVFilterGraph *graph = avfilter_graph_alloc();
+    AVFilterContext *src = NULL, *sink = NULL;
+    AVFilterInOut *ins = avfilter_inout_alloc(), *outs = avfilter_inout_alloc();
+    AVBufferSrcParameters *par = av_buffersrc_parameters_alloc();
+    LogCapture cap = { .level = AV_LOG_ERROR };
+    const char *what = "cannot set up the filters";
+    int ret;
+
+    if (filter_index)
+        *filter_index = -1;
+    if (err && errlen)
+        err[0] = '\0';
+    if (!graph || !ins || !outs || !par) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+    if (ms->type != AVMEDIA_TYPE_VIDEO && ms->type != AVMEDIA_TYPE_AUDIO) {
+        ret = AVERROR(EINVAL);
+        what = "only audio and video streams can be filtered";
+        goto end;
+    }
+
+    /* a source with the stream's own parameters, as the engine uses */
+    if (video) {
+        par->format              = ms->pix_fmt >= 0 ? ms->pix_fmt : AV_PIX_FMT_YUV420P;
+        par->width               = ms->width > 0 ? ms->width : 640;
+        par->height              = ms->height > 0 ? ms->height : 360;
+        par->sample_aspect_ratio = ms->sar.num > 0 && ms->sar.den > 0 ? ms->sar : (AVRational){ 1, 1 };
+        par->time_base           = ms->time_base.num > 0 ? ms->time_base : (AVRational){ 1, 1000 };
+        par->frame_rate          = ms->guessed_frame_rate;
+        par->color_space         = ms->color_space;
+        par->color_range         = ms->color_range;
+    } else {
+        par->format      = ms->sample_fmt >= 0 ? ms->sample_fmt : AV_SAMPLE_FMT_FLTP;
+        par->sample_rate = ms->sample_rate > 0 ? ms->sample_rate : 48000;
+        par->time_base   = (AVRational){ 1, par->sample_rate };
+        if (!ms->ch_layout[0] || av_channel_layout_from_string(&par->ch_layout, ms->ch_layout) < 0)
+            av_channel_layout_default(&par->ch_layout, ms->channels > 0 ? ms->channels : 2);
+    }
+
+    logcap_ensure_installed();
+    logcap_begin(&cap);
+    src = avfilter_graph_alloc_filter(graph, avfilter_get_by_name(video ? "buffer" : "abuffer"), "in");
+    if (!src || (ret = av_buffersrc_parameters_set(src, par)) < 0 || (ret = avfilter_init_str(src, NULL)) < 0 ||
+        (ret = avfilter_graph_create_filter(&sink, avfilter_get_by_name(video ? "buffersink" : "abuffersink"),
+                                            "out", NULL, NULL, graph)) < 0) {
+        ret = src ? ret : AVERROR(ENOMEM);
+        logcap_end();
+        goto end;
+    }
+    outs->name = av_strdup("in");
+    outs->filter_ctx = src;
+    ins->name = av_strdup("out");
+    ins->filter_ctx = sink;
+    ret = avfilter_graph_parse_ptr(graph, chain && *chain ? chain : (video ? "null" : "anull"), &ins, &outs, NULL);
+    if (ret >= 0)
+        ret = avfilter_graph_config(graph, NULL);
+    logcap_end();
+
+end:
+    if (ret < 0 && err && errlen) {
+        if (cap.first[0])
+            snprintf(err, errlen, "%s: %s (%s)", what, av_err2str(ret), cap.first);
+        else
+            snprintf(err, errlen, "%s: %s", what, av_err2str(ret));
+    }
+    if (ret < 0 && filter_index &&   /* the first message may not name it ("Eval: ...") */
+        (*filter_index = parsed_filter_index(cap.first)) < 0)
+        *filter_index = parsed_filter_index(cap.last);
+    avfilter_inout_free(&ins);
+    avfilter_inout_free(&outs);
+    avfilter_graph_free(&graph);
+    if (par)
+        av_channel_layout_uninit(&par->ch_layout);
+    av_free(par);
+    return ret;
+}
+
 static void check_filters(V *v, int si, const JobStream *js, enum AVMediaType type)
 {
     int named_ok = 1, errors_before = v->r->nb_errors;
@@ -490,6 +590,17 @@ static void check_filters(V *v, int si, const JobStream *js, enum AVMediaType ty
     job_stream_filter_string(js, &bp);
     if (bp.len)
         parse_chain(v, si, bp.str, type);
+    /* then configure it for this stream's real format: catches values only
+     * checked then (fps=fast), and formats a filter cannot take */
+    if (bp.len && v->r->nb_errors == errors_before && v->mi) {
+        char err[768], field[64] = "filters";
+        int idx;
+        if (validate_filter_chain(&v->mi->streams[js->input_index], bp.str, &idx, err, sizeof(err)) < 0) {
+            if (idx >= 0 && !js->filter_string)
+                snprintf(field, sizeof(field), "filters[%d]", idx);
+            add(v, VAL_ERROR, si, field, "%s", err);
+        }
+    }
     av_bprint_finalize(&bp, NULL);
 }
 

@@ -13,13 +13,17 @@
 #include <libavutil/avutil.h>
 
 #include "choice_item.h"
+#include "filter_dialog.h"
 
 struct StreamRow {
+    const Caps         *caps;
     const MediaStream  *ms;
     GtkWidget          *box;
     GtkWidget          *action_dd;
     GtkWidget          *encoder_dd;
     GtkWidget          *options_btn;
+    GtkWidget          *filters_btn;
+    FilterChain        *filters;
     GListStore         *actions;         /* ConvChoiceItem, data: GINT_TO_POINTER(action + 1) */
     GListStore         *encoders;        /* ConvChoiceItem, data: const CapsEncoder * */
     GHashTable         *options;         /* encoder name -> OptBox (only what the user set) */
@@ -232,6 +236,73 @@ GHashTable *stream_row_take_options(StreamRow *row)
 }
 
 /* ------------------------------------------------------------------------- */
+/* filters                                                                   */
+
+gboolean stream_row_filterable(const StreamRow *row)
+{
+    return stream_row_action(row) == JOB_TRANSCODE &&
+           (row->ms->type == AVMEDIA_TYPE_VIDEO || row->ms->type == AVMEDIA_TYPE_AUDIO);
+}
+
+static void update_filters_label(StreamRow *row)
+{
+    int n = filter_chain_active(row->filters);
+    char label[32];
+
+    if (filter_chain_text(row->filters))
+        g_strlcpy(label, n ? "Filters (text)" : "Filters", sizeof(label));
+    else if (n)
+        g_snprintf(label, sizeof(label), "Filters (%d)", n);
+    else
+        g_strlcpy(label, "Filters", sizeof(label));
+    gtk_button_set_label(GTK_BUTTON(row->filters_btn), label);
+    /* shown whenever converting, so the rows line up; subtitles have no filters */
+    gtk_widget_set_visible(row->filters_btn, stream_row_action(row) == JOB_TRANSCODE);
+    gtk_widget_set_sensitive(row->filters_btn, stream_row_filterable(row));
+    gtk_widget_set_tooltip_text(row->filters_btn, stream_row_filterable(row)
+                                ? "Filters applied before encoding" : "Subtitles cannot be filtered");
+}
+
+static void on_filters_edited(void *data)
+{
+    StreamRow *row = data;
+
+    update_filters_label(row);
+    if (row->changed)
+        row->changed(row->user);
+}
+
+FilterChain *stream_row_filters(const StreamRow *row)
+{
+    return row->filters;
+}
+
+FilterChain *stream_row_take_filters(StreamRow *row)
+{
+    FilterChain *c = row->filters;
+
+    if (c)
+        filter_chain_set_listener(c, NULL, NULL);
+    row->filters = NULL;
+    return c;
+}
+
+GtkWindow *stream_row_edit_filters(StreamRow *row)
+{
+    GtkRoot *root;
+
+    if (!stream_row_filterable(row))
+        return NULL;
+    root = gtk_widget_get_root(row->box);
+    return filter_dialog_show(GTK_IS_WINDOW(root) ? GTK_WINDOW(root) : NULL, row->caps, row->ms, row->filters);
+}
+
+static void on_filters_clicked(GtkButton *b, gpointer data)
+{
+    stream_row_edit_filters(data);
+}
+
+/* ------------------------------------------------------------------------- */
 
 static void on_action_changed(GObject *obj, GParamSpec *pspec, gpointer data)
 {
@@ -241,6 +312,7 @@ static void on_action_changed(GObject *obj, GParamSpec *pspec, gpointer data)
     gtk_widget_set_visible(row->encoder_dd, transcode);
     gtk_widget_set_visible(row->options_btn, transcode);
     update_options_label(row);
+    update_filters_label(row);
     if (row->changed)
         row->changed(row->user);
 }
@@ -333,7 +405,7 @@ static guint fill_encoders(StreamRow *row, const CapsMuxer *mux, const CapsStrea
 }
 
 StreamRow *stream_row_new(const Caps *caps, const CapsMuxer *mux, const MediaStream *ms,
-                          GHashTable *options,
+                          GHashTable *options, FilterChain *filters,
                           int prev_action, const char *prev_encoder,
                           StreamRowChanged changed, void *user)
 {
@@ -345,7 +417,9 @@ StreamRow *stream_row_new(const Caps *caps, const CapsMuxer *mux, const MediaStr
     guint sel_action, sel_encoder;
     char *desc, *markup;
 
+    row->caps     = caps;
     row->ms       = ms;
+    row->filters  = filters ? filters : filter_chain_new();
     row->options  = options ? options
                             : g_hash_table_new_full(g_str_hash, g_str_equal, g_free, opt_box_free);
     row->actions  = g_list_store_new(CONV_TYPE_CHOICE_ITEM);
@@ -400,13 +474,19 @@ StreamRow *stream_row_new(const Caps *caps, const CapsMuxer *mux, const MediaStr
     g_signal_connect(row->options_btn, "clicked", G_CALLBACK(on_options_clicked), row);
     gtk_box_append(GTK_BOX(row->box), row->options_btn);
 
+    row->filters_btn = gtk_button_new_with_label("Filters");
+    g_signal_connect(row->filters_btn, "clicked", G_CALLBACK(on_filters_clicked), row);
+    gtk_box_append(GTK_BOX(row->box), row->filters_btn);
+
     gtk_widget_set_visible(row->encoder_dd, stream_row_action(row) == JOB_TRANSCODE);
     gtk_widget_set_visible(row->options_btn, stream_row_action(row) == JOB_TRANSCODE);
     update_options_label(row);
+    update_filters_label(row);
 
     /* connect last: building the row must not fire change notifications */
     row->changed = changed;
     row->user    = user;
+    filter_chain_set_listener(row->filters, on_filters_edited, row);
     g_signal_connect(row->action_dd, "notify::selected", G_CALLBACK(on_action_changed), row);
     g_signal_connect(row->encoder_dd, "notify::selected", G_CALLBACK(on_encoder_changed), row);
     g_object_ref_sink(row->box);
@@ -420,6 +500,14 @@ void stream_row_free(StreamRow *row)
     g_signal_handlers_disconnect_by_data(row->action_dd, row);
     g_signal_handlers_disconnect_by_data(row->encoder_dd, row);
     g_signal_handlers_disconnect_by_data(row->options_btn, row);
+    g_signal_handlers_disconnect_by_data(row->filters_btn, row);
+    if (row->filters) {   /* not handed over: the stream is gone, so is its editor */
+        GtkWindow *dlg = filter_chain_get_dialog(row->filters);
+        filter_chain_set_listener(row->filters, NULL, NULL);
+        if (dlg)
+            gtk_window_destroy(dlg);
+        filter_chain_unref(row->filters);
+    }
     if (row->options)
         g_hash_table_unref(row->options);
     g_object_unref(row->box);
