@@ -39,7 +39,7 @@ MSYS2 MINGW64 shell (it needs the FFmpeg and GTK DLLs from `mingw64/bin`):
 ./build/ffconv.exe [file]
 ```
 
-`-DCONV_GUI_TESTS=ON` adds four UI tests (`ctest -L gui`); they open windows.
+`-DCONV_GUI_TESTS=ON` adds six UI tests (`ctest -L gui`); they open windows.
 
 The tests use the synthetic files in [tests/media](tests/media) and the jobs in
 [tests/jobs](tests/jobs); see [tests/README.md](tests/README.md) for what each
@@ -203,9 +203,14 @@ Two arrows turning around a play triangle, on an indigo-to-teal tile.
   *Cancel*, the FFmpeg log, and at the end *Show in folder* or the problems
   found.
 
-The UI can be driven without a user through `FFCONV_TEST_*` environment
-variables (open a file, pick a container and actions, convert, cancel, save
-window snapshots as PNG); see the top of [src/ui/main.c](src/ui/main.c).
+For the UI tests, the application can be driven without a user through
+`FFCONV_TEST_*` environment variables (open a file, pick a container and
+actions, set options, convert, cancel, save window snapshots as PNG). All of
+that lives in [src/ui/testhooks.c](src/ui/testhooks.c), which only uses the
+windows' public events and operations (`window.h`, `progress.h`); the
+application code contains no test code. It is compiled in when
+`CONV_TEST_HOOKS` is ON (the default, and required by the UI tests);
+`-DCONV_TEST_HOOKS=OFF` builds `ffconv` without it (`testhooks_none.c`).
 
 ## Option editor (M6)
 

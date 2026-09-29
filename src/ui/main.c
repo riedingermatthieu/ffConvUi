@@ -3,26 +3,8 @@
  *
  *   ffconv [file]
  *
- * Test hooks (environment variables), used to check the UI without a user:
- *   FFCONV_TEST_INPUT=<file>          open this file at startup
- *   FFCONV_TEST_CONTAINER=<key>       then select this container
- *   FFCONV_TEST_STREAMS=0=libx264,1=copy,2=drop   then set the streams' actions
- *   FFCONV_TEST_OPTIONS=0:crf=30;0:preset=fast;mux:movflags=+faststart
- *                                     then set options through the option dialogs
- *   FFCONV_TEST_OPTIONS_SHOT=<png>    save the first option dialog to a PNG
- *   FFCONV_TEST_OUTPUT=<file>         then set this output (and "overwrite")
- *   FFCONV_TEST_SHOT=<png>            then save the main window to a PNG
- *   FFCONV_TEST_COMMAND_FILE=<file>   then write the ffmpeg command shown in the window
- *   FFCONV_TEST_STATES_FILE=<file>    then write every dropdown entry and its greyed state
- *   FFCONV_TEST_POPUP=container|action<N>|encoder<N>  then open that list, save it to
- *   FFCONV_TEST_POPUP_SHOT=<png>      this PNG, and quit
- *   FFCONV_TEST_CONVERT=1             then click Convert, and quit when done
- *   FFCONV_TEST_JOB_JSON=<file>       write the job Convert runs, as JSON
- *   FFCONV_TEST_PROGRESS_SHOT=<png>   save the progress window at >= 30 %
- *   FFCONV_TEST_DONE_SHOT=<png>       save the progress window when done
- *   FFCONV_TEST_CANCEL_AT=<percent>   press Cancel once progress reaches it
- *   FFCONV_TEST_EXPAND_LOG=1          open the FFmpeg log in the progress window
- * Without FFCONV_TEST_CONVERT, the application quits after the shot.
+ * Test builds (CONV_TEST_HOOKS) can be driven by FFCONV_TEST_* environment
+ * variables: see testhooks.c.
  */
 #include <locale.h>
 #include <stdio.h>
@@ -32,8 +14,8 @@
 #include <libavutil/log.h>
 
 #include "caps.h"
+#include "testhooks.h"
 #include "uilog.h"
-#include "ui_util.h"
 #include "window.h"
 
 /* also the icon name: see src/ui/ffconv.gresource.xml */
@@ -71,7 +53,10 @@ static void on_startup(GApplication *app, gpointer data)
     if ((ret = caps_build(&g_caps)) < 0) {
         g_printerr("cannot enumerate the FFmpeg build: %s\n", av_err2str(ret));
         g_application_quit(app);
+        return;
     }
+
+    testhooks_install(GTK_APPLICATION(app));   /* a no-op unless built with CONV_TEST_HOOKS */
 }
 
 static ConvWindow *new_window(GApplication *app)
@@ -82,30 +67,10 @@ static ConvWindow *new_window(GApplication *app)
     return w;
 }
 
-static gboolean empty_shot(gpointer data)
-{
-    GtkWindow *win = conv_window_get(data);
-
-    ui_save_snapshot(GTK_WIDGET(win), ui_test_env("FFCONV_TEST_SHOT"));
-    g_application_quit(G_APPLICATION(gtk_window_get_application(win)));
-    return G_SOURCE_REMOVE;
-}
-
 static void on_activate(GApplication *app, gpointer data)
 {
-    const char *input = ui_test_env("FFCONV_TEST_INPUT");
-    ConvWindow *w;
-
-    if (!g_caps)
-        return;
-    w = new_window(app);
-    if (input) {
-        GFile *file = g_file_new_for_path(input);
-        conv_window_open(w, file);
-        g_object_unref(file);
-    } else if (ui_test_env("FFCONV_TEST_SHOT")) {
-        g_timeout_add(800, empty_shot, w);   /* the window with no file */
-    }
+    if (g_caps)
+        new_window(app);
 }
 
 static void on_open(GApplication *app, GFile **files, int nb, const char *hint, gpointer data)

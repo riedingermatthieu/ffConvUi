@@ -62,6 +62,15 @@ if(GTK4_FOUND)
         src/ui/uilog.c
         src/ui/ui_util.c)
     target_link_libraries(ffconv PRIVATE convcore PkgConfig::GTK4)
+
+    # The UI test driver (FFCONV_TEST_* variables) lives in its own file and is
+    # only compiled in on request; the application code has no test code.
+    option(CONV_TEST_HOOKS "Build the UI test driver into ffconv (needed by the UI tests)" ON)
+    if(CONV_TEST_HOOKS)
+        target_sources(ffconv PRIVATE src/ui/testhooks.c)
+    else()
+        target_sources(ffconv PRIVATE src/ui/testhooks_none.c)
+    endif()
     target_compile_options(ffconv PRIVATE ${CONV_WARNINGS})
 
     # App icon for GTK windows: compiled into the program as a GResource
@@ -150,6 +159,9 @@ endif()
 
 # GUI tests open real windows: opt in with -DCONV_GUI_TESTS=ON.
 option(CONV_GUI_TESTS "Run the ffconv UI tests (they open windows)" OFF)
+if(GTK4_FOUND AND CONV_GUI_TESTS AND NOT CONV_TEST_HOOKS)
+    message(FATAL_ERROR "CONV_GUI_TESTS needs CONV_TEST_HOOKS=ON (the UI test driver)")
+endif()
 if(GTK4_FOUND AND CONV_GUI_TESTS)
     add_test(NAME ui_empty
              COMMAND ${CMAKE_COMMAND} -DFFCONV=$<TARGET_FILE:ffconv> -DOUT_DIR=${CMAKE_CURRENT_BINARY_DIR}

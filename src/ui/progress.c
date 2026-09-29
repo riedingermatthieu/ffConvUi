@@ -9,7 +9,7 @@
 #include "progress.h"
 
 #include <stdatomic.h>
-#include <stdlib.h>
+#include <string.h>
 
 #include <glib/gstdio.h>
 #include <libavutil/error.h>
@@ -37,14 +37,15 @@ typedef struct Run {
     GtkWidget        *status, *bar, *details, *issues, *log_view;
     GtkWidget        *cancel_btn, *close_btn, *folder_btn;
     int               running;
-    int               progress_shot_taken;
+    GtkWidget        *expander;
+    ProgressListener  listener;
+    void             *listener_user;
     ProgressFinished  finished;
     void             *user;
 } Run;
 
 enum { MSG_CONVERTING, MSG_PROGRESS };
 
-static void on_cancel(GtkButton *b, gpointer data);
 
 typedef struct Msg {
     Run           *run;
@@ -78,17 +79,6 @@ static void set_status(Run *r, const char *text, const char *css_class)
         gtk_widget_add_css_class(r->status, css_class);
 }
 
-static gboolean progress_shot(gpointer data)
-{
-    Run *r = data;
-    const char *path = ui_test_env("FFCONV_TEST_PROGRESS_SHOT");
-
-    if (r->win && path)
-        ui_save_snapshot(GTK_WIDGET(r->win), path);
-    run_release(r);
-    return G_SOURCE_REMOVE;
-}
-
 static void show_progress(Run *r, const EngineProgress *p)
 {
     char t[32], d[32], size[32], eta[32], text[256];
@@ -115,12 +105,8 @@ static void show_progress(Run *r, const EngineProgress *p)
                    t, d, p->speed, size, eta);
     gtk_label_set_text(GTK_LABEL(r->details), text);
 
-    if (ui_test_env("FFCONV_TEST_CANCEL_AT") && p->percent >= atof(ui_test_env("FFCONV_TEST_CANCEL_AT")))
-        on_cancel(NULL, r);
-    if (!r->progress_shot_taken && p->percent >= 30 && ui_test_env("FFCONV_TEST_PROGRESS_SHOT")) {
-        r->progress_shot_taken = 1;
-        g_timeout_add(200, progress_shot, g_rc_box_acquire(r));
-    }
+    if (r->listener.progress)
+        r->listener.progress(r->win, p, r->listener_user);
 }
 
 static gboolean msg_idle(gpointer data)
@@ -225,19 +211,6 @@ static void show_issues(Run *r)
     g_string_free(s, TRUE);
 }
 
-static gboolean done_shot(gpointer data)
-{
-    Run *r = data;
-    const char *path = ui_test_env("FFCONV_TEST_DONE_SHOT");
-
-    if (r->win && path)
-        ui_save_snapshot(GTK_WIDGET(r->win), path);
-    if (r->finished)
-        r->finished(r->ret, r->user);
-    run_release(r);
-    return G_SOURCE_REMOVE;
-}
-
 static void on_done(GObject *src, GAsyncResult *res, gpointer data)
 {
     Run *r = data;
@@ -283,8 +256,11 @@ static void on_done(GObject *src, GAsyncResult *res, gpointer data)
             gtk_widget_set_visible(r->issues, TRUE);
         }
     }
-    /* let the window redraw before a test snapshot / the owner's callback */
-    g_timeout_add(300, done_shot, r);   /* takes over the task's reference */
+    if (r->win && r->listener.finished)
+        r->listener.finished(r->win, r->ret, r->listener_user);
+    if (r->finished)
+        r->finished(r->ret, r->user);
+    run_release(r);   /* the task's reference */
 }
 
 /* ------------------------------------------------------------------------- */
@@ -397,9 +373,7 @@ GtkWindow *progress_start(GtkWindow *parent, ConvJob *job, const Caps *caps,
     gtk_box_append(GTK_BOX(box), r->issues);
 
     /* FFmpeg log */
-    expander = gtk_expander_new("FFmpeg log");
-    if (ui_test_env("FFCONV_TEST_EXPAND_LOG"))
-        gtk_expander_set_expanded(GTK_EXPANDER(expander), TRUE);
+    expander = r->expander = gtk_expander_new("FFmpeg log");
     scroll = gtk_scrolled_window_new();
     gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(scroll), 180);
     gtk_widget_set_vexpand(scroll, TRUE);
@@ -437,10 +411,11 @@ GtkWindow *progress_start(GtkWindow *parent, ConvJob *job, const Caps *caps,
     g_signal_connect(r->close_btn, "clicked", G_CALLBACK(on_close), r);
     g_signal_connect(r->win, "close-request", G_CALLBACK(on_close_request), r);
     g_signal_connect(r->win, "destroy", G_CALLBACK(on_destroy), g_rc_box_acquire(r));
+    g_object_set_data(G_OBJECT(r->win), "conv-run", r);   /* for the progress_*() calls */
 
     gtk_window_present(r->win);
 
-    /* the task's reference is released by done_shot() */
+    /* the task's reference is released by on_done() */
     task = g_task_new(NULL, NULL, on_done, g_rc_box_acquire(r));
     g_task_set_task_data(task, r, NULL);
     g_task_run_in_thread(task, worker);
@@ -448,4 +423,40 @@ GtkWindow *progress_start(GtkWindow *parent, ConvJob *job, const Caps *caps,
 
     run_release(r);   /* ours: the window and the task hold theirs */
     return r->win;
+}
+
+/* ------------------------------------------------------------------------- */
+
+static Run *run_of(GtkWindow *win)
+{
+    return win ? g_object_get_data(G_OBJECT(win), "conv-run") : NULL;
+}
+
+void progress_set_listener(GtkWindow *win, const ProgressListener *l, void *user)
+{
+    Run *r = run_of(win);
+
+    if (!r)
+        return;
+    if (l)
+        r->listener = *l;
+    else
+        memset(&r->listener, 0, sizeof(r->listener));
+    r->listener_user = user;
+}
+
+void progress_cancel(GtkWindow *win)
+{
+    Run *r = run_of(win);
+
+    if (r)
+        on_cancel(NULL, r);
+}
+
+void progress_show_log(GtkWindow *win, gboolean shown)
+{
+    Run *r = run_of(win);
+
+    if (r)
+        gtk_expander_set_expanded(GTK_EXPANDER(r->expander), shown);
 }

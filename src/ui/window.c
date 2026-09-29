@@ -51,6 +51,8 @@ struct ConvWindow {
     guint            cmd_copied_id;
     GtkWidget       *convert_btn;
     GtkWindow       *progress_win;
+    ConvWindowListener listener;
+    void            *listener_user;
 
     StreamRow      **rows;
     int              nb_rows;
@@ -59,9 +61,6 @@ struct ConvWindow {
     int              converting;
     int              loading;
     int              updating;         /* programmatic widget changes: no callbacks */
-    char           **test_options;     /* FFCONV_TEST_OPTIONS groups still to apply */
-    int              test_option_step;
-    GtkWindow       *test_dialog;
 };
 
 static void schedule_validate(ConvWindow *w);
@@ -595,234 +594,6 @@ static void show_summary(ConvWindow *w)
     g_free(text);
 }
 
-static gboolean test_step_done(gpointer data)
-{
-    g_application_quit(G_APPLICATION(((ConvWindow *)data)->app));
-    return G_SOURCE_REMOVE;
-}
-
-static void on_progress_finished(int ret, void *user);
-static void start_conversion(ConvWindow *w);
-
-/* FFCONV_TEST_*: drive the window without a user (see main.c) */
-static gboolean test_step(gpointer data);
-
-/* FFCONV_TEST_STATES_FILE: every dropdown entry, one per line:
- * "<list> <on|off> <label> | <reason>" (list: container, action#N, encoder#N) */
-static void dump_store(GString *out, const char *list, GListModel *model)
-{
-    guint n = g_list_model_get_n_items(model);
-
-    for (guint i = 0; i < n; i++) {
-        ConvChoiceItem *it = g_list_model_get_item(model, i);
-        gboolean on = conv_choice_item_get_enabled(it);
-        g_string_append_printf(out, "%s %s %s%s%s\n", list, on ? "on " : "off",
-                               conv_choice_item_get_label(it), on ? "" : " | ",
-                               on ? "" : conv_choice_item_get_reason(it));
-        g_object_unref(it);
-    }
-}
-
-static void test_write_states(ConvWindow *w, const char *path)
-{
-    GString *out = g_string_new(NULL);
-
-    g_string_append_printf(out, "selected container %s\n", w->mux ? w->mux->key : "-");
-    for (int i = 0; i < w->nb_rows; i++)
-        g_string_append_printf(out, "selected #%d %s %s\n", stream_row_input_index(w->rows[i]),
-                               job_action_name(stream_row_action(w->rows[i])),
-                               stream_row_encoder(w->rows[i]) ? stream_row_encoder(w->rows[i]) : "-");
-    g_string_append_printf(out, "convert %s\n", gtk_widget_get_sensitive(w->convert_btn) ? "enabled" : "disabled");
-    dump_store(out, "container", gtk_drop_down_get_model(GTK_DROP_DOWN(w->container_dd)));
-    for (int i = 0; i < w->nb_rows; i++) {
-        char name[32];
-        g_snprintf(name, sizeof(name), "action#%d", stream_row_input_index(w->rows[i]));
-        dump_store(out, name, gtk_drop_down_get_model(GTK_DROP_DOWN(stream_row_action_dropdown(w->rows[i]))));
-        g_snprintf(name, sizeof(name), "encoder#%d", stream_row_input_index(w->rows[i]));
-        dump_store(out, name, gtk_drop_down_get_model(GTK_DROP_DOWN(stream_row_encoder_dropdown(w->rows[i]))));
-    }
-    g_file_set_contents(path, out->str, out->len, NULL);
-    g_string_free(out, TRUE);
-}
-
-/* FFCONV_TEST_POPUP=container | action<N> | encoder<N>: open that dropdown,
- * save its popup to FFCONV_TEST_POPUP_SHOT, then quit. */
-static GtkWidget *test_popup_dropdown(ConvWindow *w)
-{
-    const char *which = ui_test_env("FFCONV_TEST_POPUP");
-
-    if (!strcmp(which, "container"))
-        return w->container_dd;
-    for (int i = 0; i < w->nb_rows; i++) {
-        char a[32], e[32];
-        g_snprintf(a, sizeof(a), "action%d", stream_row_input_index(w->rows[i]));
-        g_snprintf(e, sizeof(e), "encoder%d", stream_row_input_index(w->rows[i]));
-        if (!strcmp(which, a))
-            return stream_row_action_dropdown(w->rows[i]);
-        if (!strcmp(which, e))
-            return stream_row_encoder_dropdown(w->rows[i]);
-    }
-    return NULL;
-}
-
-static gboolean test_popup_shot(gpointer data)
-{
-    ConvWindow *w = data;
-    GtkWidget *dd = test_popup_dropdown(w);
-
-    for (GtkWidget *c = dd ? gtk_widget_get_first_child(dd) : NULL; c; c = gtk_widget_get_next_sibling(c))
-        if (GTK_IS_POPOVER(c) && ui_test_env("FFCONV_TEST_POPUP_SHOT"))
-            ui_save_snapshot(c, ui_test_env("FFCONV_TEST_POPUP_SHOT"));
-    g_timeout_add(100, test_step_done, w);
-    return G_SOURCE_REMOVE;
-}
-
-static void test_open_popup(ConvWindow *w)
-{
-    GtkWidget *dd = test_popup_dropdown(w);
-
-    if (dd)
-        g_signal_emit_by_name(dd, "activate");   /* pops the list up */
-    g_timeout_add(800, test_popup_shot, w);
-}
-
-static gboolean test_close_dialog(gpointer data)
-{
-    ConvWindow *w = data;
-    const char *shot = ui_test_env("FFCONV_TEST_OPTIONS_SHOT");
-
-    if (w->test_dialog) {
-        if (shot && !w->test_option_step++)      /* the first dialog only */
-            ui_save_snapshot(GTK_WIDGET(w->test_dialog), shot);
-        gtk_window_destroy(w->test_dialog);
-        w->test_dialog = NULL;
-    }
-    g_timeout_add(400, test_step, w);
-    return G_SOURCE_REMOVE;
-}
-
-/* FFCONV_TEST_OPTIONS="0:crf=30;0:preset=veryfast;mux:movflags=+faststart":
- * open the option dialog of the first target (stream index or "mux"), set its
- * values through the widgets, close it, and leave the rest for the next step. */
-static void test_options_step(ConvWindow *w)
-{
-    char **items = g_strsplit(ui_test_env("FFCONV_TEST_OPTIONS"), ";", -1);
-    GString *rest = g_string_new(NULL);
-    OptionEditor *ed = NULL;
-    char *target = NULL;
-
-    for (char **it = items; *it; it++) {
-        const char *colon = strchr(*it, ':'), *eq;
-        char *tgt, *name;
-
-        if (!colon || !(eq = strchr(colon, '=')))
-            continue;
-        tgt = g_strndup(*it, colon - *it);
-        if (!target) {
-            target = g_strdup(tgt);
-            if (!strcmp(target, "mux")) {
-                w->test_dialog = edit_mux_options(w, &ed);
-            } else {
-                for (int i = 0; i < w->nb_rows; i++)
-                    if (stream_row_input_index(w->rows[i]) == atoi(target))
-                        w->test_dialog = stream_row_edit_options(w->rows[i], &ed);
-            }
-        }
-        if (strcmp(tgt, target)) {
-            g_string_append_printf(rest, "%s%s", rest->len ? ";" : "", *it);
-        } else if (ed) {
-            name = g_strndup(colon + 1, eq - colon - 1);
-            if (!option_editor_set_text(ed, name, eq + 1))
-                g_printerr("test: cannot set %s=%s\n", name, eq + 1);
-            g_free(name);
-        }
-        g_free(tgt);
-    }
-    if (rest->len)
-        g_setenv("FFCONV_TEST_OPTIONS", rest->str, TRUE);
-    else
-        g_unsetenv("FFCONV_TEST_OPTIONS");
-    g_string_free(rest, TRUE);
-    g_free(target);
-    g_strfreev(items);
-    g_timeout_add(500, test_close_dialog, w);
-}
-
-static gboolean test_step(gpointer data)
-{
-    ConvWindow *w = data;
-    const char *container = ui_test_env("FFCONV_TEST_CONTAINER");
-    const char *output    = ui_test_env("FFCONV_TEST_OUTPUT");
-    const char *shot      = ui_test_env("FFCONV_TEST_SHOT");
-
-    if (container) {
-        for (int i = 0; i < w->nb_containers; i++)
-            if (!strcmp(w->containers[i]->key, container))
-                gtk_drop_down_set_selected(GTK_DROP_DOWN(w->container_dd), i);
-        g_unsetenv("FFCONV_TEST_CONTAINER");
-        g_timeout_add(600, test_step, w);     /* let rows and validation update */
-        return G_SOURCE_REMOVE;
-    }
-    if (ui_test_env("FFCONV_TEST_STREAMS")) {
-        /* "0=libx264,1=copy,2=drop": input stream -> copy / drop / encoder */
-        char **items = g_strsplit(ui_test_env("FFCONV_TEST_STREAMS"), ",", -1);
-        for (char **it = items; *it; it++) {
-            char **kv = g_strsplit(*it, "=", 2);
-            if (kv[0] && kv[1]) {
-                int idx = atoi(kv[0]);
-                for (int i = 0; i < w->nb_rows; i++) {
-                    if (stream_row_input_index(w->rows[i]) != idx)
-                        continue;
-                    if (!strcmp(kv[1], "copy"))
-                        stream_row_select(w->rows[i], JOB_COPY, NULL);
-                    else if (!strcmp(kv[1], "drop"))
-                        stream_row_select(w->rows[i], JOB_DROP, NULL);
-                    else
-                        stream_row_select(w->rows[i], JOB_TRANSCODE, kv[1]);
-                }
-            }
-            g_strfreev(kv);
-        }
-        g_strfreev(items);
-        g_unsetenv("FFCONV_TEST_STREAMS");
-        g_timeout_add(600, test_step, w);
-        return G_SOURCE_REMOVE;
-    }
-    if (ui_test_env("FFCONV_TEST_OPTIONS")) {
-        test_options_step(w);
-        return G_SOURCE_REMOVE;
-    }
-    if (output) {
-        gtk_editable_set_text(GTK_EDITABLE(w->output_entry), output);
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->overwrite_check), TRUE);
-        g_unsetenv("FFCONV_TEST_OUTPUT");
-        g_timeout_add(600, test_step, w);
-        return G_SOURCE_REMOVE;
-    }
-    if (ui_test_env("FFCONV_TEST_COMMAND_FILE")) {   /* the command as displayed */
-        GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->cmd_view));
-        GtkTextIter a, b;
-        char *text;
-        gtk_text_buffer_get_bounds(buf, &a, &b);
-        text = gtk_text_buffer_get_text(buf, &a, &b, FALSE);
-        g_file_set_contents(ui_test_env("FFCONV_TEST_COMMAND_FILE"), text, -1, NULL);
-        g_free(text);
-    }
-    if (shot)
-        ui_save_snapshot(GTK_WIDGET(w->win), shot);
-    if (ui_test_env("FFCONV_TEST_STATES_FILE"))
-        test_write_states(w, ui_test_env("FFCONV_TEST_STATES_FILE"));
-    if (ui_test_env("FFCONV_TEST_POPUP")) {
-        test_open_popup(w);
-        return G_SOURCE_REMOVE;
-    }
-    if (ui_test_env("FFCONV_TEST_CONVERT") && gtk_widget_get_sensitive(w->convert_btn))
-        start_conversion(w);
-    else
-        g_timeout_add(100, test_step_done, w);
-    return G_SOURCE_REMOVE;
-}
-
 static void probe_thread(GTask *task, gpointer src, gpointer data, GCancellable *c)
 {
     MediaInfo *mi = NULL;
@@ -875,8 +646,8 @@ static void on_probed(GObject *src, GAsyncResult *res, gpointer data)
     fit_stream_list(w);
     schedule_validate(w);
 
-    if (ui_test_env("FFCONV_TEST_INPUT"))
-        g_timeout_add(800, test_step, w);
+    if (w->listener.file_loaded)
+        w->listener.file_loaded(w, w->listener_user);
 }
 
 void conv_window_open(ConvWindow *w, GFile *file)
@@ -981,8 +752,8 @@ static void on_progress_finished(int ret, void *user)
     w->converting   = 0;
     w->progress_win = NULL;
     schedule_validate(w);   /* e.g. the output now exists */
-    if (ui_test_env("FFCONV_TEST_CONVERT"))
-        g_timeout_add(100, test_step_done, w);
+    if (w->listener.conversion_finished)
+        w->listener.conversion_finished(w, ret, w->listener_user);
 }
 
 static void start_conversion(ConvWindow *w)
@@ -991,16 +762,11 @@ static void start_conversion(ConvWindow *w)
 
     if (w->converting || w->nb_errors || !(job = build_job(w)))
         return;
-    if (ui_test_env("FFCONV_TEST_JOB_JSON")) {   /* what the widgets produced */
-        AVBPrint bp;
-        av_bprint_init(&bp, 0, AV_BPRINT_SIZE_UNLIMITED);
-        job_to_json(job, &bp);
-        g_file_set_contents(ui_test_env("FFCONV_TEST_JOB_JSON"), bp.str, bp.len, NULL);
-        av_bprint_finalize(&bp, NULL);
-    }
     w->converting = 1;
     update_convert_button(w);
     w->progress_win = progress_start(w->win, job, w->caps, on_progress_finished, w);
+    if (w->listener.conversion_started)   /* job: owned by the progress window now */
+        w->listener.conversion_started(w, job, w->progress_win, w->listener_user);
 }
 
 static void on_convert_clicked(GtkButton *b, gpointer data)
@@ -1054,7 +820,6 @@ static void on_destroy(GtkWidget *widget, gpointer data)
     if (w->container_store)
         g_object_unref(w->container_store);
     g_hash_table_unref(w->mux_options);
-    g_strfreev(w->test_options);
     mi_free(&w->mi);
     g_free(w);
 }
@@ -1072,6 +837,7 @@ ConvWindow *conv_window_new(GtkApplication *app, const Caps *caps)
     w->caps = caps;
     w->mux_options = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, opt_box_free);
     w->win  = GTK_WINDOW(gtk_application_window_new(app));
+    g_object_set_data(G_OBJECT(w->win), "conv-window", w);
     gtk_window_set_title(w->win, "ffConv");
     gtk_window_set_default_size(w->win, 900, 720);
 
@@ -1242,4 +1008,91 @@ ConvWindow *conv_window_new(GtkApplication *app, const Caps *caps)
 GtkWindow *conv_window_get(ConvWindow *w)
 {
     return w->win;
+}
+
+ConvWindow *conv_window_from_window(GtkWindow *win)
+{
+    return win ? g_object_get_data(G_OBJECT(win), "conv-window") : NULL;
+}
+
+void conv_window_set_listener(ConvWindow *w, const ConvWindowListener *l, void *user)
+{
+    if (l)
+        w->listener = *l;
+    else
+        memset(&w->listener, 0, sizeof(w->listener));
+    w->listener_user = user;
+}
+
+/* ------------------------------------------------------------------------- */
+/* operations                                                                */
+
+gboolean conv_window_select_container(ConvWindow *w, const char *key)
+{
+    for (int i = 0; i < w->nb_containers; i++) {
+        if (!strcmp(w->containers[i]->key, key)) {
+            gtk_drop_down_set_selected(GTK_DROP_DOWN(w->container_dd), i);   /* -> on_container_changed */
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+const char *conv_window_container_key(ConvWindow *w)
+{
+    return w->mux ? w->mux->key : NULL;
+}
+
+GtkWidget *conv_window_container_dropdown(ConvWindow *w)
+{
+    return w->container_dd;
+}
+
+int conv_window_nb_streams(ConvWindow *w)
+{
+    return w->nb_rows;
+}
+
+StreamRow *conv_window_stream_at(ConvWindow *w, int position)
+{
+    return position >= 0 && position < w->nb_rows ? w->rows[position] : NULL;
+}
+
+StreamRow *conv_window_stream(ConvWindow *w, int input_index)
+{
+    for (int i = 0; i < w->nb_rows; i++)
+        if (stream_row_input_index(w->rows[i]) == input_index)
+            return w->rows[i];
+    return NULL;
+}
+
+void conv_window_set_output(ConvWindow *w, const char *path, gboolean overwrite)
+{
+    gtk_editable_set_text(GTK_EDITABLE(w->output_entry), path);          /* -> on_output_changed */
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(w->overwrite_check), overwrite);
+}
+
+GtkWindow *conv_window_edit_muxer_options(ConvWindow *w, OptionEditor **editor)
+{
+    return edit_mux_options(w, editor);
+}
+
+gboolean conv_window_can_convert(ConvWindow *w)
+{
+    return gtk_widget_get_sensitive(w->convert_btn);
+}
+
+void conv_window_convert(ConvWindow *w)
+{
+    if (conv_window_can_convert(w))
+        start_conversion(w);
+}
+
+char *conv_window_command(ConvWindow *w)
+{
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->cmd_view));
+    GtkTextIter a, b;
+
+    gtk_text_buffer_get_bounds(buf, &a, &b);
+    return gtk_text_buffer_get_text(buf, &a, &b, FALSE);
 }
