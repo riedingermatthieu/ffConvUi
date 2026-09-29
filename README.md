@@ -40,7 +40,7 @@ MSYS2 MINGW64 shell (it needs the FFmpeg and GTK DLLs from `mingw64/bin`):
 ./build/ffconv.exe [file]
 ```
 
-`-DCONV_GUI_TESTS=ON` adds nine UI tests (`ctest -L gui`, among them `ui_filters` and `ui_filters_bad` for the filter editor); they open windows.
+`-DCONV_GUI_TESTS=ON` adds ten UI tests (`ctest -L gui`, among them `ui_preview_zoom` for zoom and pan, `ui_filters` and `ui_filters_bad` for the filter editor); they open windows.
 
 The tests use the synthetic files in [tests/media](tests/media) and the jobs in
 [tests/jobs](tests/jobs); see [tests/README.md](tests/README.md) for what each
@@ -217,7 +217,20 @@ the main window and the preview stay usable, and follow every change.
 
 *Preview…* in the main window opens a window with the file's video streams, a
 time slider, and the frame at that time **before** and **after** conversion,
-side by side, or at *Actual pixels* (both at 100 %, scrolling together).
+side by side.
+
+* **Zoom and pan**, both views together, always on the same region:
+  Ctrl+wheel or pinch zooms around the pointer, dragging (left or middle
+  button) pans, the wheel scrolls, double-click switches between *Fit* and
+  100 % at the pointer. The toolbar has − / level / +, *Fit* and *1:1*; the
+  keys `+` `−` `0` (fit) `1` (100 %) do the same. From 10 % to 1600 %.
+* From 200 % frames are drawn without smoothing, so single pixels and
+  compression artefacts are visible as they are.
+* The result is shown in the original's geometry: a result scaled by a
+  filter (e.g. to 640×360) fills the same box, so both views compare the
+  same part of the picture (a result with another aspect, e.g. cropped, is
+  centred in it). Its caption gives its real size.
+* Changing stream or time keeps the zoom and the part in view.
 
 * The result is real: a 1.5 s clip around the frame (0.5 s before, 1 s after,
   for rate control and look-ahead) is converted by the engine with the

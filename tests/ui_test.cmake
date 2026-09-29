@@ -1,6 +1,6 @@
 # GUI test: run ffconv with its FFCONV_TEST_* hooks and check what it produced.
 # Usage: cmake -DFFCONV=<exe> -DOUT_DIR=<dir>
-#              -DMODE=<empty|shot|convert|options|greyed|fixed|preview|filters|filters_bad>
+#              -DMODE=<empty|shot|convert|options|greyed|fixed|preview|preview_zoom|filters|filters_bad>
 #              [-DINPUT=<file>]
 #              -P ui_test.cmake
 # (opens real windows: only registered when CONV_GUI_TESTS is ON)
@@ -66,15 +66,20 @@ if(MODE STREQUAL "greyed" OR MODE STREQUAL "fixed")
     endif()
 endif()
 
-if(MODE STREQUAL "preview")
+if(MODE STREQUAL "preview" OR MODE STREQUAL "preview_zoom")
     # libx265 at 4.5 s, through the preview window
-    set(pshot "${OUT_DIR}/ui_test_preview_window.png")
+    set(pshot "${OUT_DIR}/ui_test_${MODE}_window.png")
     file(REMOVE "${pshot}")
     set(ENV{FFCONV_TEST_CONTAINER} "mp4")
     set(ENV{FFCONV_TEST_STREAMS} "0=libx265,1=aac,2=mov_text")
     set(ENV{FFCONV_TEST_OPTIONS} "0:crf=30;0:preset=ultrafast")
     set(ENV{FFCONV_TEST_PREVIEW} "4.5")
     set(ENV{FFCONV_TEST_PREVIEW_SHOT} "${pshot}")
+    if(MODE STREQUAL "preview_zoom")
+        # 400 %, on the edge of the checkerboard where the line crosses it
+        set(ENV{FFCONV_TEST_PREVIEW_ZOOM} "4")
+        set(ENV{FFCONV_TEST_PREVIEW_PAN} "0.66,0.62")
+    endif()
 endif()
 
 execute_process(COMMAND "${FFCONV}" RESULT_VARIABLE rc TIMEOUT 180)
@@ -131,7 +136,7 @@ if(MODE STREQUAL "greyed" OR MODE STREQUAL "fixed")
         endif()
     endforeach()
 endif()
-if(MODE STREQUAL "preview" AND NOT EXISTS "${pshot}")
+if((MODE STREQUAL "preview" OR MODE STREQUAL "preview_zoom") AND NOT EXISTS "${pshot}")
     message(FATAL_ERROR "the preview was not rendered")
 endif()
 if(MODE STREQUAL "options")

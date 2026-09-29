@@ -22,8 +22,13 @@ typedef struct PreviewWindowListener {
 
 void preview_window_set_listener(GtkWindow *win, const PreviewWindowListener *l, void *user);
 
-/* What the user can do: move the time slider, show actual pixels. */
-void preview_window_set_time(GtkWindow *win, double seconds);
-void preview_window_set_actual_pixels(GtkWindow *win, gboolean actual);
+/* What the user can do: move the time slider; zoom (scale of the original
+ * frame: 1 = actual pixels, 0 = fit the view); pan (the point of the frame
+ * to put in the middle of the view, as fractions of its width and height;
+ * kept for the first frame if none is shown yet). */
+void   preview_window_set_time(GtkWindow *win, double seconds);
+void   preview_window_set_zoom(GtkWindow *win, double zoom);
+double preview_window_get_zoom(GtkWindow *win);
+void   preview_window_center_on(GtkWindow *win, double fx, double fy);
 
 #endif /* UI_PREVIEW_WINDOW_H */

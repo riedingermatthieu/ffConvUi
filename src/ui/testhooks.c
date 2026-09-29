@@ -28,7 +28,9 @@
  *   FFCONV_TEST_POPUP_SHOT=<png>      open that list, save it, and quit
  *   FFCONV_TEST_PREVIEW=<seconds>     open the preview at that time and, once
  *   FFCONV_TEST_PREVIEW_SHOT=<png>    rendered, save it, and quit
- *   FFCONV_TEST_PREVIEW_ZOOM=1        ... with "Actual pixels" on
+ *   FFCONV_TEST_PREVIEW_ZOOM=<scale>  ... zoomed (1 = actual pixels, 0 = fit)
+ *   FFCONV_TEST_PREVIEW_PAN=<fx>,<fy> ... centred on this point of the frame
+ *                                     (fractions of its width and height)
  *   FFCONV_TEST_CONVERT=1             press Convert, and quit when done
  *   FFCONV_TEST_JOB_JSON=<file>       write the job Convert runs, as JSON
  *   FFCONV_TEST_EXPAND_LOG=1          open the FFmpeg log in the progress window
@@ -407,7 +409,11 @@ static void open_preview(const char *seconds)
         return;
     }
     if (env("FFCONV_TEST_PREVIEW_ZOOM"))
-        preview_window_set_actual_pixels(win, TRUE);
+        preview_window_set_zoom(win, g_ascii_strtod(env("FFCONV_TEST_PREVIEW_ZOOM"), NULL));
+    if (env("FFCONV_TEST_PREVIEW_PAN")) {
+        const char *p = env("FFCONV_TEST_PREVIEW_PAN"), *comma = strchr(p, ',');
+        preview_window_center_on(win, g_ascii_strtod(p, NULL), comma ? g_ascii_strtod(comma + 1, NULL) : 0.5);
+    }
     preview_window_set_time(win, g_ascii_strtod(seconds, NULL));   /* renders */
     preview_window_set_listener(win, &preview_listener, NULL);
 }
