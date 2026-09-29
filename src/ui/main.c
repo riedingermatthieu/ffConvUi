@@ -12,6 +12,7 @@
  *   FFCONV_TEST_OPTIONS_SHOT=<png>    save the first option dialog to a PNG
  *   FFCONV_TEST_OUTPUT=<file>         then set this output (and "overwrite")
  *   FFCONV_TEST_SHOT=<png>            then save the main window to a PNG
+ *   FFCONV_TEST_COMMAND_FILE=<file>   then write the ffmpeg command shown in the window
  *   FFCONV_TEST_CONVERT=1             then click Convert, and quit when done
  *   FFCONV_TEST_JOB_JSON=<file>       write the job Convert runs, as JSON
  *   FFCONV_TEST_PROGRESS_SHOT=<png>   save the progress window at >= 30 %

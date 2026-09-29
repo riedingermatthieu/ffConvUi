@@ -15,6 +15,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/avstring.h>
 
+#include "cmdline.h"
 #include "job.h"
 #include "option_editor.h"
 #include "probe.h"
@@ -43,6 +44,8 @@ struct ConvWindow {
     int              nb_containers;
     GtkWidget       *output_entry, *overwrite_check;
     GtkWidget       *issues_box;
+    GtkWidget       *cmd_box, *cmd_view, *cmd_shell_dd, *cmd_copy_btn;
+    guint            cmd_copied_id;
     GtkWidget       *convert_btn;
     GtkWindow       *progress_win;
 
@@ -235,6 +238,68 @@ static void update_convert_button(ConvWindow *w)
     gtk_widget_set_sensitive(w->convert_btn, w->mi && !w->loading && !w->converting && !w->nb_errors);
 }
 
+/* ------------------------------------------------------------------------- */
+/* equivalent ffmpeg command                                                 */
+
+static CmdShell selected_shell(ConvWindow *w)
+{
+    static const CmdShell shells[] = { CMD_SHELL_POWERSHELL, CMD_SHELL_CMD, CMD_SHELL_POSIX };
+    guint i = gtk_drop_down_get_selected(GTK_DROP_DOWN(w->cmd_shell_dd));
+    return i < G_N_ELEMENTS(shells) ? shells[i] : cmd_default_shell();
+}
+
+static void show_command(ConvWindow *w, const ConvJob *job)
+{
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->cmd_view));
+    AVBPrint bp;
+
+    gtk_widget_set_visible(w->cmd_box, job != NULL);
+    if (!job)
+        return;
+    av_bprint_init(&bp, 0, AV_BPRINT_SIZE_UNLIMITED);
+    job_to_ffmpeg_command(job, w->mi, selected_shell(w), &bp);
+    gtk_text_buffer_set_text(buf, bp.str, -1);
+    av_bprint_finalize(&bp, NULL);
+}
+
+static void on_shell_changed(GObject *obj, GParamSpec *pspec, gpointer data)
+{
+    ConvWindow *w = data;
+    ConvJob *job = build_job(w);
+
+    show_command(w, job);
+    job_free(&job);
+}
+
+static gboolean reset_copy_label(gpointer data)
+{
+    ConvWindow *w = data;
+
+    gtk_button_set_label(GTK_BUTTON(w->cmd_copy_btn), "Copy");
+    w->cmd_copied_id = 0;
+    return G_SOURCE_REMOVE;
+}
+
+static void on_copy_command(GtkButton *b, gpointer data)
+{
+    ConvWindow *w = data;
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->cmd_view));
+    GtkTextIter start, end;
+    char *text;
+
+    gtk_text_buffer_get_bounds(buf, &start, &end);
+    text = gtk_text_buffer_get_text(buf, &start, &end, FALSE);
+    gdk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(b)), text);
+    g_free(text);
+
+    gtk_button_set_label(b, "Copied");
+    if (w->cmd_copied_id)
+        g_source_remove(w->cmd_copied_id);
+    w->cmd_copied_id = g_timeout_add(1500, reset_copy_label, w);
+}
+
+/* ------------------------------------------------------------------------- */
+
 static gboolean do_validate(gpointer data)
 {
     ConvWindow *w = data;
@@ -247,10 +312,13 @@ static gboolean do_validate(gpointer data)
     w->nb_errors = 1;
 
     if (!w->mi || w->loading) {
+        show_command(w, NULL);
         update_convert_button(w);
         return G_SOURCE_REMOVE;
     }
-    if (!(job = build_job(w)) || validate_job(job, w->caps, w->mi, 0, &rep) < 0) {
+    job = build_job(w);
+    show_command(w, job);   /* even when the job has errors: it shows what was chosen */
+    if (!job || validate_job(job, w->caps, w->mi, 0, &rep) < 0) {
         add_issue_line(w, "dialog-error-symbolic", "error", "Out of memory");
         job_free(&job);
         update_convert_button(w);
@@ -592,6 +660,15 @@ static gboolean test_step(gpointer data)
         g_timeout_add(600, test_step, w);
         return G_SOURCE_REMOVE;
     }
+    if (ui_test_env("FFCONV_TEST_COMMAND_FILE")) {   /* the command as displayed */
+        GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->cmd_view));
+        GtkTextIter a, b;
+        char *text;
+        gtk_text_buffer_get_bounds(buf, &a, &b);
+        text = gtk_text_buffer_get_text(buf, &a, &b, FALSE);
+        g_file_set_contents(ui_test_env("FFCONV_TEST_COMMAND_FILE"), text, -1, NULL);
+        g_free(text);
+    }
     if (shot)
         ui_save_snapshot(GTK_WIDGET(w->win), shot);
     if (ui_test_env("FFCONV_TEST_CONVERT") && gtk_widget_get_sensitive(w->convert_btn))
@@ -819,6 +896,8 @@ static void on_destroy(GtkWidget *widget, gpointer data)
 {
     ConvWindow *w = data;
 
+    if (w->cmd_copied_id)
+        g_source_remove(w->cmd_copied_id);
     if (w->validate_id)
         g_source_remove(w->validate_id);
     for (int i = 0; i < w->nb_rows; i++)
@@ -845,7 +924,7 @@ ConvWindow *conv_window_new(GtkApplication *app, const Caps *caps)
     w->mux_options = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, opt_box_free);
     w->win  = GTK_WINDOW(gtk_application_window_new(app));
     gtk_window_set_title(w->win, "ffConv");
-    gtk_window_set_default_size(w->win, 900, 640);
+    gtk_window_set_default_size(w->win, 900, 720);
 
     header = gtk_header_bar_new();
     open_btn = gtk_button_new_with_mnemonic("_Open…");
@@ -928,6 +1007,52 @@ ConvWindow *conv_window_new(GtkApplication *app, const Caps *caps)
     gtk_grid_attach(GTK_GRID(grid), w->overwrite_check, 1, 2, 2, 1);
     gtk_widget_set_sensitive(grid, FALSE);
     gtk_box_append(GTK_BOX(box), grid);
+
+    /* equivalent ffmpeg command */
+    {
+        GtkWidget *head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8), *title, *frame2, *scroll;
+        GtkStringList *shells = gtk_string_list_new((const char *[]){ "PowerShell", "cmd", "Bash", NULL });
+
+        w->cmd_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+        gtk_widget_set_margin_top(w->cmd_box, 12);
+
+        title = heading("Equivalent ffmpeg command");
+        gtk_widget_set_hexpand(title, TRUE);
+        gtk_widget_set_tooltip_text(title, "The ffmpeg command-line tool runs the same conversion with "
+                                    "this command. It updates with every change.");
+        gtk_box_append(GTK_BOX(head), title);
+        w->cmd_shell_dd = gtk_drop_down_new(G_LIST_MODEL(shells), NULL);
+        gtk_widget_set_tooltip_text(w->cmd_shell_dd, "Quote the arguments for this shell");
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(w->cmd_shell_dd),
+                                   cmd_default_shell() == CMD_SHELL_POSIX ? 2 : 0);
+        gtk_box_append(GTK_BOX(head), w->cmd_shell_dd);
+        w->cmd_copy_btn = gtk_button_new_with_label("Copy");
+        gtk_widget_set_tooltip_text(w->cmd_copy_btn, "Copy the command to the clipboard");
+        gtk_box_append(GTK_BOX(head), w->cmd_copy_btn);
+        gtk_box_append(GTK_BOX(w->cmd_box), head);
+
+        w->cmd_view = gtk_text_view_new();
+        gtk_text_view_set_editable(GTK_TEXT_VIEW(w->cmd_view), FALSE);
+        gtk_text_view_set_monospace(GTK_TEXT_VIEW(w->cmd_view), TRUE);
+        gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(w->cmd_view), GTK_WRAP_WORD_CHAR);
+        gtk_text_view_set_top_margin(GTK_TEXT_VIEW(w->cmd_view), 6);
+        gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(w->cmd_view), 6);
+        gtk_text_view_set_left_margin(GTK_TEXT_VIEW(w->cmd_view), 8);
+        gtk_text_view_set_right_margin(GTK_TEXT_VIEW(w->cmd_view), 8);
+        scroll = gtk_scrolled_window_new();
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+        gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(scroll), TRUE);
+        gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(scroll), 110);
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), w->cmd_view);
+        frame2 = gtk_frame_new(NULL);
+        gtk_frame_set_child(GTK_FRAME(frame2), scroll);
+        gtk_box_append(GTK_BOX(w->cmd_box), frame2);
+
+        gtk_widget_set_visible(w->cmd_box, FALSE);   /* until a file is open */
+        gtk_box_append(GTK_BOX(box), w->cmd_box);
+        g_signal_connect(w->cmd_shell_dd, "notify::selected", G_CALLBACK(on_shell_changed), w);
+        g_signal_connect(w->cmd_copy_btn, "clicked", G_CALLBACK(on_copy_command), w);
+    }
 
     /* validation + convert */
     w->issues_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);

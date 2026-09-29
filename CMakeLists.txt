@@ -35,7 +35,8 @@ add_library(convcore STATIC
     src/core/job.c
     src/core/engine.c
     src/core/logcap.c
-    src/core/validate.c)
+    src/core/validate.c
+    src/core/cmdline.c)
 target_include_directories(convcore PUBLIC src/core)
 target_link_libraries(convcore PUBLIC PkgConfig::FFMPEG)
 target_compile_options(convcore PRIVATE ${CONV_WARNINGS})
@@ -131,6 +132,20 @@ foreach(job ${CONV_TEST_JOBS})
                  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     endif()
 endforeach()
+
+# The equivalent ffmpeg command must give the engine's result (needs the
+# ffmpeg CLI and bash, both in MSYS2).
+find_program(CONV_FFMPEG_CLI ffmpeg)
+find_program(CONV_BASH bash)
+if(CONV_FFMPEG_CLI AND CONV_BASH)
+    foreach(name m3_acceptance drawtext_escaping)
+        add_test(NAME command_${name}
+                 COMMAND ${CMAKE_COMMAND} -DCONVCLI=$<TARGET_FILE:convcli> -DFFMPEG=${CONV_FFMPEG_CLI}
+                         -DBASH=${CONV_BASH} -DJOB=${CMAKE_CURRENT_SOURCE_DIR}/tests/jobs/${name}.json
+                         -DOUT_DIR=${CMAKE_CURRENT_BINARY_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/command_test.cmake
+                 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    endforeach()
+endif()
 
 # GUI tests open real windows: opt in with -DCONV_GUI_TESTS=ON.
 option(CONV_GUI_TESTS "Run the ffconv UI tests (they open windows)" OFF)

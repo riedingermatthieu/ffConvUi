@@ -14,6 +14,7 @@ built on the same library.
 | `src/core/engine.*` | M3 | Runs a job: demux → decode → filter → encode → mux, or stream copy. Progress callback, cancellation from another thread, dry run. |
 | `src/core/validate.*` | M4 | Checks a job before running it: static checks, then a dry run; reports every problem with its stream and field. |
 | `src/core/logcap.*` | M4 | Captures FFmpeg's log per thread, so errors carry FFmpeg's own reason. |
+| `src/core/cmdline.*` | — | The `ffmpeg` command line equivalent to a job, quoted for Bash, PowerShell or cmd. |
 | `src/cli/convcli.c` | M1–M4 | Test front end. |
 | `src/ui/*` | M5–M6 | GTK 4 application: main window, stream rows, option editor, progress window, FFmpeg log view. |
 
@@ -62,6 +63,7 @@ convcli hw
 convcli job-template <file> [--muxer <key>] [--output <file>]
 convcli run <job.json> [--overwrite] [--quiet] [--cancel-after <seconds>]
 convcli validate <job.json> [--static]
+convcli command <job.json> [--shell bash|powershell|cmd]
 ```
 
 Examples:
@@ -230,6 +232,38 @@ VBR, `frame_duration=40` → 40 ms packets), libvpx-vp9 (`crf=45`/`b=0` →
 1561 kb/s against 6317 kb/s at crf 20, `deadline`, `cpu-used`, `row-mt`),
 MP4 `movflags=faststart` (moov before mdat), libvorbis Quality (q 0 / 2 / 10
 → 56 / 71 / 364 kb/s, the same as `ffmpeg -q:a`).
+
+## Equivalent ffmpeg command
+
+The main window shows the `ffmpeg` command that runs the same conversion,
+updated with every change, with a *Copy* button and a choice of shell for the
+quoting (PowerShell, cmd, Bash). `convcli command job.json [--shell …]`
+prints it too; `job_to_ffmpeg_command()` produces it.
+
+```text
+ffmpeg -y -i in.mkv -map 0:0 -c:v:0 libx265 -crf:v:0 28 -filter:v:0 scale=w=1280:h=-2,fps=fps=25
+       -map 0:1 -c:a:0 aac -b:a:0 192k -map 0:2 -c:s:0 mov_text -movflags +faststart out.mp4
+```
+
+* Each stream is `-map 0:<input index>` followed by its options, with output
+  stream specifiers counted per type in the job's order (`v:0`, `a:1`…).
+* Quality (`global_quality` + the `qscale` flag) is written as `-q`.
+* Metadata overrides become `-metadata` / `-metadata:s:<spec>`; turning off
+  metadata or chapter copying becomes `-map_metadata -1` / `-map_chapters -1`.
+* Quoting: Bash uses `'…'`; PowerShell `'…'` (it also quotes commas, which
+  would otherwise split an argument into an array); cmd `"…"` with the
+  Windows argument rules. The cmd form is for the interactive prompt: in a
+  `.bat` file, `%` must be doubled.
+
+Checked: the commands for `m3_acceptance` and `drawtext_escaping` (filter
+text with `: , [ ] ; ' %`), run by the real `ffmpeg` from Bash, PowerShell and
+cmd, give frames identical to the engine's (framemd5 of video and audio, and
+the same subtitles); the `command_*` tests repeat this for Bash.
+
+Not reproduced by the command: the engine's handling of variable-frame-rate
+input (it keeps the timestamps; the ffmpeg CLI's default may duplicate or
+drop frames for some containers — add `-fps_mode passthrough` to match) and
+its removal of stale Matroska statistics tags on re-encoded streams.
 
 ## How "what is possible" is decided
 

@@ -13,6 +13,7 @@
  *   convcli job-template <file> [--muxer <key>] [--output <file>]
  *   convcli run <job.json> [--overwrite] [--quiet] [--cancel-after <seconds>]
  *   convcli validate <job.json> [--static]
+ *   convcli command <job.json> [--shell bash|powershell|cmd]
  */
 #include <inttypes.h>
 #include <signal.h>
@@ -38,6 +39,7 @@
 
 #include "avopt_schema.h"
 #include "caps.h"
+#include "cmdline.h"
 #include "engine.h"
 #include "job.h"
 #include "probe.h"
@@ -72,7 +74,7 @@ static const char *arg_positional(const Args *a, int index)
 {
     static const char *const with_value[] = {
         "--for", "--type", "--muxer", "--search", "--class", "--output",
-        "--cancel-after", NULL
+        "--cancel-after", "--shell", NULL
     };
     int n = 0;
 
@@ -981,6 +983,42 @@ static int cmd_run(const Args *a)
 }
 
 /* ------------------------------------------------------------------------- */
+/* command                                                                   */
+
+static int cmd_command(const Args *a)
+{
+    const char *path  = arg_positional(a, 0);
+    const char *shell = arg_value(a, "--shell");
+    CmdShell sh = cmd_default_shell();
+    MediaInfo *mi = NULL;
+    ConvJob *job = NULL;
+    char err[1024];
+    AVBPrint bp;
+    int ret;
+
+    if (!path || (shell && cmd_shell_from_name(shell, &sh) < 0)) {
+        fprintf(stderr, "usage: convcli command <job.json> [--shell bash|powershell|cmd]\n");
+        return AVERROR(EINVAL);
+    }
+    if ((ret = job_load(path, &job, err, sizeof(err))) < 0) {
+        fprintf(stderr, "%s: %s\n", path, err);
+        return ret;
+    }
+    /* the input's stream types give readable specifiers (-c:v:0); without
+     * them output indices are used (-c:0) */
+    if (mi_probe(job->input, &mi, err, sizeof(err)) < 0)
+        fprintf(stderr, "note: %s: %s (using stream indices)\n", job->input, err);
+
+    av_bprint_init(&bp, 0, AV_BPRINT_SIZE_UNLIMITED);
+    job_to_ffmpeg_command(job, mi, sh, &bp);
+    printf("%s\n", bp.str);
+    av_bprint_finalize(&bp, NULL);
+    mi_free(&mi);
+    job_free(&job);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
 /* validate                                                                  */
 
 static int cmd_validate(const Args *a)
@@ -1085,7 +1123,7 @@ int main(int argc, char **argv)
         { "version", cmd_version }, { "probe", cmd_probe },     { "muxers", cmd_muxers },
         { "encoders", cmd_encoders }, { "actions", cmd_actions }, { "filters", cmd_filters },
         { "options", cmd_options }, { "hw", cmd_hw },         { "job-template", cmd_job_template },
-        { "run", cmd_run },           { "validate", cmd_validate },
+        { "run", cmd_run },           { "validate", cmd_validate }, { "command", cmd_command },
     };
     char **wargs = NULL;
     Args args;
