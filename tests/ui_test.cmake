@@ -28,6 +28,21 @@ if(MODE STREQUAL "options")
     set(ENV{FFCONV_TEST_OPTIONS_SHOT} "${OUT_DIR}/ui_test_options_dialog.png")
 endif()
 
+if(MODE STREQUAL "greyed" OR MODE STREQUAL "fixed")
+    # test.mkv chosen for Matroska (every stream copied), then AVI: the
+    # choices must stay as they are, greyed out where AVI cannot take them
+    set(states "${OUT_DIR}/ui_test_${MODE}_states.txt")
+    file(REMOVE "${states}")
+    set(ENV{FFCONV_TEST_CONTAINER} "avi")
+    set(ENV{FFCONV_TEST_OUTPUT} "${OUT_DIR}/ui_test_${MODE}.avi")
+    set(ENV{FFCONV_TEST_STATES_FILE} "${states}")
+    if(MODE STREQUAL "greyed")
+        set(ENV{FFCONV_TEST_STREAMS} "2=libopus")            # AVI cannot store Opus
+    else()
+        set(ENV{FFCONV_TEST_STREAMS} "2=aac,3=drop")         # what AVI can take
+    endif()
+endif()
+
 execute_process(COMMAND "${FFCONV}" RESULT_VARIABLE rc TIMEOUT 180)
 if(NOT rc EQUAL 0)
     message(FATAL_ERROR "ffconv exited with ${rc}")
@@ -43,6 +58,24 @@ if(MODE STREQUAL "convert" OR MODE STREQUAL "options")
     if(size LESS 100000)
         message(FATAL_ERROR "output is missing or too small (${size} bytes)")
     endif()
+endif()
+if(MODE STREQUAL "greyed" OR MODE STREQUAL "fixed")
+    file(READ "${states}" got)
+    if(MODE STREQUAL "greyed")
+        set(expected "selected container avi" "selected #3 copy" "selected #2 transcode libopus"
+                     "convert disabled" "action#3 off Copy | avi cannot store subrip"
+                     "encoder#2 off libopus | avi cannot store opus"
+                     "container off avi" "container on  matroska")
+    else()
+        set(expected "selected container avi" "selected #2 transcode aac" "selected #3 drop"
+                     "convert enabled" "container on  avi")
+    endif()
+    foreach(line ${expected})
+        string(FIND "${got}" "${line}" pos)
+        if(pos LESS 0)
+            message(FATAL_ERROR "expected \"${line}\" in:\n${got}")
+        endif()
+    endforeach()
 endif()
 if(MODE STREQUAL "options")
     # the job the widgets produced...

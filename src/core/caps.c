@@ -464,7 +464,7 @@ static int subtitle_kind_ok(const MediaStream *s, const CapsEncoder *e)
     return 0;
 }
 
-static CapsCompat copy_compat(const CapsMuxer *m, const MediaStream *s)
+CapsCompat caps_copy_compat(const CapsMuxer *m, const MediaStream *s)
 {
     if (s->codec_id == AV_CODEC_ID_NONE)
         return CAPS_NO;
@@ -476,7 +476,7 @@ static CapsCompat copy_compat(const CapsMuxer *m, const MediaStream *s)
 
 static int stream_fits(const Caps *c, const CapsMuxer *m, const MediaStream *s)
 {
-    if (copy_compat(m, s) != CAPS_NO)
+    if (caps_copy_compat(m, s) != CAPS_NO)
         return 1;
     if (!s->has_decoder)
         return 0;
@@ -555,12 +555,12 @@ static int cmp_choice(const void *a, const void *b)
 }
 
 int caps_stream_actions(const Caps *c, const CapsMuxer *m, const MediaStream *s,
-                        int include_experimental, CapsStreamActions *out)
+                        unsigned flags, CapsStreamActions *out)
 {
-    int n = 0;
+    int n = 0, nb_ok = 0;
 
     memset(out, 0, sizeof(*out));
-    out->copy = copy_compat(m, s);
+    out->copy = caps_copy_compat(m, s);
 
     if (!is_transcodable_type(s->type)) {
         out->note = "only stream copy is possible for this stream type";
@@ -581,23 +581,31 @@ int caps_stream_actions(const Caps *c, const CapsMuxer *m, const MediaStream *s,
 
     for (int i = 0; i < c->nb_encoders; i++) {
         const CapsEncoder *e = &c->encoders[i];
+        CapsReason reason = CAPS_REASON_NONE;
         CapsCompat compat;
 
-        if (e->type != s->type || !subtitle_kind_ok(s, e))
+        if (e->type != s->type)
             continue;
-        if (e->is_experimental && !include_experimental)
+        if (e->is_experimental && !(flags & CAPS_ACTIONS_EXPERIMENTAL))
             continue;
-        compat = caps_mux_codec(m, e->id);
-        if (compat == CAPS_NO)
+        if (!subtitle_kind_ok(s, e)) {
+            compat = CAPS_NO;
+            reason = CAPS_REASON_SUBTITLE_KIND;
+        } else if ((compat = caps_mux_codec(m, e->id)) == CAPS_NO) {
+            reason = CAPS_REASON_CONTAINER;
+        }
+        if (compat == CAPS_NO && !(flags & CAPS_ACTIONS_INCOMPATIBLE))
             continue;
         out->encoders[n].enc    = e;
         out->encoders[n].compat = compat;
+        out->encoders[n].reason = reason;
+        nb_ok += compat != CAPS_NO;
         n++;
     }
-    qsort(out->encoders, n, sizeof(*out->encoders), cmp_choice);
+    qsort(out->encoders, n, sizeof(*out->encoders), cmp_choice);   /* possible ones first */
     out->nb_encoders = n;
 
-    if (!n)
+    if (!nb_ok)
         out->note = s->type == AVMEDIA_TYPE_SUBTITLE
             ? "no subtitle encoder of the same kind (text/bitmap) fits this container"
             : "no encoder for this stream type fits this container";

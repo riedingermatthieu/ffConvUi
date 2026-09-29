@@ -525,13 +525,7 @@ static void check_stream(V *v, int si)
     tname = tname ? tname : "unknown";
 
     if (js->action == JOB_COPY) {
-        CapsStreamActions act;
-        if (caps_stream_actions(v->caps, v->mux, ms, 1, &act) < 0) {
-            v->oom = 1;
-            return;
-        }
-        compat = act.copy;
-        caps_stream_actions_free(&act);
+        compat = caps_copy_compat(v->mux, ms);
         if (compat == CAPS_NO)
             add(v, VAL_ERROR, si, "action", "%s cannot store %s %s: transcode this stream or choose "
                 "another container", v->mux->key, ms->codec_name, tname);
@@ -542,7 +536,20 @@ static void check_stream(V *v, int si)
         return;
     }
 
-    /* transcode */
+    /* transcode: first whether this stream can be converted at all */
+    if (ms->type != AVMEDIA_TYPE_VIDEO && ms->type != AVMEDIA_TYPE_AUDIO && ms->type != AVMEDIA_TYPE_SUBTITLE) {
+        add(v, VAL_ERROR, si, "action", "%s streams can only be copied or dropped", tname);
+        return;
+    }
+    if (!ms->has_decoder) {
+        add(v, VAL_ERROR, si, "action", "this FFmpeg build cannot decode %s: copy or drop the stream",
+            ms->codec_name);
+        return;
+    }
+    if (!js->encoder || !*js->encoder) {
+        add(v, VAL_ERROR, si, "encoder", "choose an encoder");
+        return;
+    }
     if (!(enc = caps_find_encoder(v->caps, js->encoder))) {
         char hint[96];
         Suggest s;
@@ -558,15 +565,6 @@ static void check_stream(V *v, int si)
         add(v, VAL_ERROR, si, "encoder", "%s is a%s %s encoder but input stream %d is %s", enc->name,
             enc->type == AVMEDIA_TYPE_AUDIO ? "n" : "", av_get_media_type_string(enc->type),
             js->input_index, tname);
-        return;
-    }
-    if (ms->type != AVMEDIA_TYPE_VIDEO && ms->type != AVMEDIA_TYPE_AUDIO && ms->type != AVMEDIA_TYPE_SUBTITLE) {
-        add(v, VAL_ERROR, si, "action", "%s streams can only be copied or dropped", tname);
-        return;
-    }
-    if (!ms->has_decoder) {
-        add(v, VAL_ERROR, si, "action", "this FFmpeg build cannot decode %s: copy or drop the stream",
-            ms->codec_name);
         return;
     }
     if (ms->type == AVMEDIA_TYPE_SUBTITLE) {

@@ -526,7 +526,7 @@ static int cmd_actions(const Args *a)
         CapsStreamActions act;
         int yes = 0, maybe = 0, limit;
 
-        if ((ret = caps_stream_actions(caps, mux, s, experimental, &act)) < 0)
+        if ((ret = caps_stream_actions(caps, mux, s, experimental ? CAPS_ACTIONS_EXPERIMENTAL : 0, &act)) < 0)
             goto end;
 
         printf("\n  Stream #%d %s: %s\n", s->index, type_str(s->type), s->codec_name);

@@ -13,6 +13,9 @@
  *   FFCONV_TEST_OUTPUT=<file>         then set this output (and "overwrite")
  *   FFCONV_TEST_SHOT=<png>            then save the main window to a PNG
  *   FFCONV_TEST_COMMAND_FILE=<file>   then write the ffmpeg command shown in the window
+ *   FFCONV_TEST_STATES_FILE=<file>    then write every dropdown entry and its greyed state
+ *   FFCONV_TEST_POPUP=container|action<N>|encoder<N>  then open that list, save it to
+ *   FFCONV_TEST_POPUP_SHOT=<png>      this PNG, and quit
  *   FFCONV_TEST_CONVERT=1             then click Convert, and quit when done
  *   FFCONV_TEST_JOB_JSON=<file>       write the job Convert runs, as JSON
  *   FFCONV_TEST_PROGRESS_SHOT=<png>   save the progress window at >= 30 %

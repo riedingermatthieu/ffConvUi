@@ -180,15 +180,22 @@ Two arrows turning around a play triangle, on an indigo-to-teal tile.
 
 * **Input**: *Open…* or drop a file on the window. It is probed on a worker
   thread; the summary shows format, duration, size and stream count.
-* **Streams**: one row per input stream with its description and the actions
-  the selected container allows (Copy, Convert, Drop). *Convert* shows an
-  encoder list (best first, type to search); hardware encoders and
-  unconfirmed ("?") choices are marked. Defaults: copy when the container is
-  known to accept the stream, else the preferred software encoder, else drop.
-* **Output**: containers that can hold at least one stream (common first,
-  "keeps N of M streams" when some would be dropped). The input's own
-  container is preselected when it keeps everything, else Matroska. The file
-  name follows the container's extension until you choose another one.
+* **Streams**: one row per input stream with its description, an action
+  (Copy, Convert, Drop) and, for *Convert*, an encoder list (possible ones
+  first, type to search); hardware encoders and unconfirmed ("?") choices are
+  marked. Defaults for a new file: copy when the container is known to accept
+  the stream, else the preferred software encoder, else drop.
+* **Output**: every container, those that can hold this file's streams first
+  (common first). The input's own container is preselected when it keeps
+  everything, else Matroska. The file name follows the container's extension
+  until you choose another one.
+* **Incompatible choices are greyed out, not removed**: an action or encoder
+  the container cannot store, and a container that cannot store the streams
+  as currently chosen, are drawn greyed with a ⚠ and the reason as tooltip
+  ("avi cannot store opus"). They stay selectable, and changing one choice
+  never changes another: switching container keeps every stream's action and
+  encoder as they are. Validation lists what does not fit, and *Convert*
+  stays disabled until the job is valid.
 * **Live validation**: every change re-runs the static checks (250 ms after
   the last change); errors disable *Convert*.
 * **Convert** opens the progress window, which runs the dry run and then the

@@ -15,6 +15,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/avstring.h>
 
+#include "choice_item.h"
 #include "cmdline.h"
 #include "job.h"
 #include "option_editor.h"
@@ -36,12 +37,14 @@ struct ConvWindow {
 
     GtkWidget       *input_label, *summary_label;
     GtkWidget       *stream_list;
+    GtkWidget       *stream_scroll;
     GtkWidget       *output_grid;
     GtkWidget       *container_dd;
     GtkWidget       *mux_options_btn;
     GHashTable      *mux_options;      /* muxer key -> OptBox (only what the user set) */
     const CapsMuxer **containers;      /* dropdown position -> muxer */
     int              nb_containers;
+    GListStore      *container_store;  /* ConvChoiceItem per container, greyed when incompatible */
     GtkWidget       *output_entry, *overwrite_check;
     GtkWidget       *issues_box;
     GtkWidget       *cmd_box, *cmd_view, *cmd_shell_dd, *cmd_copy_btn;
@@ -62,6 +65,7 @@ struct ConvWindow {
 };
 
 static void schedule_validate(ConvWindow *w);
+static void update_container_states(ConvWindow *w);
 
 /* ------------------------------------------------------------------------- */
 /* helpers                                                                   */
@@ -199,7 +203,8 @@ static ConvJob *build_job(ConvWindow *w)
             continue;   /* unlisted streams are dropped */
         if (!(js = job_add_stream(job, stream_row_input_index(w->rows[i]), a)))
             goto fail;
-        if (a == JOB_TRANSCODE && (!(js->encoder = av_strdup(stream_row_encoder(w->rows[i]))) ||
+        /* Convert with no encoder chosen: "" lets validation say so */
+        if (a == JOB_TRANSCODE && (!(js->encoder = av_strdup(stream_row_encoder(w->rows[i]) ? stream_row_encoder(w->rows[i]) : "")) ||
                                    av_dict_copy(&js->encoder_options, stream_row_options(w->rows[i]), 0) < 0))
             goto fail;
     }
@@ -368,6 +373,7 @@ static void schedule_validate(ConvWindow *w)
 
 static void on_row_changed(void *user)
 {
+    update_container_states(user);   /* a stream's choice changes what each container can take */
     schedule_validate(user);
 }
 
@@ -424,6 +430,14 @@ static void rebuild_rows(ConvWindow *w)
     g_free(prev_action);
 }
 
+/* Keep up to four rows visible: the window's other sections must not squeeze
+ * the stream list (it scrolls beyond four). */
+static void fit_stream_list(ConvWindow *w)
+{
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(w->stream_scroll),
+                                               MIN(MAX(w->nb_rows, 1), 4) * 50);
+}
+
 /* A new file: nothing from the previous file's streams carries over. */
 static void clear_rows(ConvWindow *w)
 {
@@ -456,6 +470,30 @@ static void set_output_extension(ConvWindow *w, const CapsMuxer *old, const Caps
     }
 }
 
+/* Grey out the containers that cannot store the streams as currently chosen.
+ * They stay selectable: choosing one keeps every stream's choice as it is,
+ * and validation explains what does not fit. */
+static void update_container_states(ConvWindow *w)
+{
+    for (int i = 0; i < w->nb_containers; i++) {
+        ConvChoiceItem *it = g_list_model_get_item(G_LIST_MODEL(w->container_store), i);
+        char why[256] = "", first[256] = "";
+        int bad = 0;
+
+        for (int r = 0; r < w->nb_rows; r++)
+            if (!stream_row_fits(w->rows[r], w->containers[i], why, sizeof(why)) && !bad++)
+                g_strlcpy(first, why, sizeof(first));
+        if (bad > 1)
+            g_snprintf(why, sizeof(why), "%s: %s, and %d more", w->containers[i]->key, first, bad - 1);
+        else if (bad)
+            g_snprintf(why, sizeof(why), "%s: %s", w->containers[i]->key, first);
+        if (bad)   /* "mp4: Cannot store..." */
+            why[strlen(w->containers[i]->key) + 2] = g_ascii_toupper(why[strlen(w->containers[i]->key) + 2]);
+        conv_choice_item_set_state(it, !bad, bad ? why : NULL);
+        g_object_unref(it);
+    }
+}
+
 static void on_container_changed(GObject *obj, GParamSpec *pspec, gpointer data)
 {
     ConvWindow *w = data;
@@ -468,55 +506,77 @@ static void on_container_changed(GObject *obj, GParamSpec *pspec, gpointer data)
     w->updating = 1;
     set_output_extension(w, old, w->mux);
     w->updating = 0;
-    rebuild_rows(w);
+    rebuild_rows(w);          /* same choices, re-checked against the new container */
+    update_container_states(w);
+    fit_stream_list(w);
     update_mux_options_label(w);
     schedule_validate(w);
 }
 
-/* Containers that can keep at least one stream, best first, with the one
- * matching the input's extension (or Matroska) selected. */
+/* Every container: first those that can keep at least one of the file's
+ * streams (common first, most streams kept), then the others. The one
+ * matching the input's extension (or Matroska) is selected. */
 static void fill_containers(ConvWindow *w)
 {
-    GtkStringList *model = gtk_string_list_new(NULL);
+    GListStore *store = g_list_store_new(CONV_TYPE_CHOICE_ITEM);
     const AVOutputFormat *same = av_guess_format(NULL, w->mi->path, NULL);
     CapsMuxerFit *fits = NULL;
-    int nb = 0, sel = -1, mkv = -1;
+    int nb = 0, n = 0, sel = -1, mkv = -1;
+    GtkWidget *dd;
 
     caps_muxers_for(w->caps, w->mi, &fits, &nb);
     g_free(w->containers);
-    w->containers    = g_new0(const CapsMuxer *, nb ? nb : 1);
-    w->nb_containers = nb;
+    w->containers = g_new0(const CapsMuxer *, w->caps->nb_muxers ? w->caps->nb_muxers : 1);
 
     for (int i = 0; i < nb; i++) {
         const CapsMuxerFit *f = &fits[i];
-        char label[256];
-
-        if (f->nb_kept < f->nb_considered)
-            g_snprintf(label, sizeof(label), "%s — %s  (keeps %d of %d streams)", f->mux->key,
-                       f->mux->long_name, f->nb_kept, f->nb_considered);
-        else
-            g_snprintf(label, sizeof(label), "%s — %s", f->mux->key, f->mux->long_name);
-        gtk_string_list_append(model, label);
-        w->containers[i] = f->mux;
-
         if (w->mux && f->mux == w->mux)
-            sel = i;                          /* keep the current choice */
+            sel = n;                          /* keep the current choice */
         if (sel < 0 && same && f->mux->fmt == same && f->nb_kept == f->nb_considered)
-            sel = i;
+            sel = n;
         if (!strcmp(f->mux->key, "matroska"))
-            mkv = i;
+            mkv = n;
+        w->containers[n++] = f->mux;
     }
+    for (int i = 0; i < w->caps->nb_muxers; i++) {
+        const CapsMuxer *m = &w->caps->muxers[i];
+        int listed = 0;
+        for (int j = 0; j < nb && !listed; j++)
+            listed = fits[j].mux == m;
+        if (!listed)
+            w->containers[n++] = m;
+    }
+    w->nb_containers = n;
     if (sel < 0)
         sel = mkv >= 0 ? mkv : 0;
 
-    w->updating = 1;
-    gtk_drop_down_set_model(GTK_DROP_DOWN(w->container_dd), G_LIST_MODEL(model));
-    if (nb)
-        gtk_drop_down_set_selected(GTK_DROP_DOWN(w->container_dd), sel);
-    w->updating = 0;
-    w->mux = nb ? w->containers[sel] : NULL;
+    for (int i = 0; i < n; i++) {
+        char label[256];
+        ConvChoiceItem *it;
+        g_snprintf(label, sizeof(label), "%s — %s", w->containers[i]->key, w->containers[i]->long_name);
+        it = conv_choice_item_new(label, w->containers[i]);
+        g_list_store_append(store, it);
+        g_object_unref(it);
+    }
 
-    g_object_unref(model);
+    /* a new dropdown over the new store keeps the factory set up by
+     * conv_choice_dropdown_new; swap it in place */
+    w->updating = 1;
+    dd = conv_choice_dropdown_new(store, TRUE);
+    gtk_widget_set_hexpand(dd, TRUE);
+    gtk_widget_set_tooltip_text(dd, gtk_widget_get_tooltip_text(w->container_dd));
+    gtk_grid_remove(GTK_GRID(w->output_grid), w->container_dd);
+    gtk_grid_attach(GTK_GRID(w->output_grid), dd, 1, 0, 1, 1);
+    w->container_dd = dd;
+    if (n)
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(dd), sel);
+    g_signal_connect(dd, "notify::selected", G_CALLBACK(on_container_changed), w);
+    w->updating = 0;
+
+    if (w->container_store)
+        g_object_unref(w->container_store);
+    w->container_store = store;
+    w->mux = n ? w->containers[sel] : NULL;
     av_free(fits);
 }
 
@@ -546,6 +606,85 @@ static void start_conversion(ConvWindow *w);
 
 /* FFCONV_TEST_*: drive the window without a user (see main.c) */
 static gboolean test_step(gpointer data);
+
+/* FFCONV_TEST_STATES_FILE: every dropdown entry, one per line:
+ * "<list> <on|off> <label> | <reason>" (list: container, action#N, encoder#N) */
+static void dump_store(GString *out, const char *list, GListModel *model)
+{
+    guint n = g_list_model_get_n_items(model);
+
+    for (guint i = 0; i < n; i++) {
+        ConvChoiceItem *it = g_list_model_get_item(model, i);
+        gboolean on = conv_choice_item_get_enabled(it);
+        g_string_append_printf(out, "%s %s %s%s%s\n", list, on ? "on " : "off",
+                               conv_choice_item_get_label(it), on ? "" : " | ",
+                               on ? "" : conv_choice_item_get_reason(it));
+        g_object_unref(it);
+    }
+}
+
+static void test_write_states(ConvWindow *w, const char *path)
+{
+    GString *out = g_string_new(NULL);
+
+    g_string_append_printf(out, "selected container %s\n", w->mux ? w->mux->key : "-");
+    for (int i = 0; i < w->nb_rows; i++)
+        g_string_append_printf(out, "selected #%d %s %s\n", stream_row_input_index(w->rows[i]),
+                               job_action_name(stream_row_action(w->rows[i])),
+                               stream_row_encoder(w->rows[i]) ? stream_row_encoder(w->rows[i]) : "-");
+    g_string_append_printf(out, "convert %s\n", gtk_widget_get_sensitive(w->convert_btn) ? "enabled" : "disabled");
+    dump_store(out, "container", gtk_drop_down_get_model(GTK_DROP_DOWN(w->container_dd)));
+    for (int i = 0; i < w->nb_rows; i++) {
+        char name[32];
+        g_snprintf(name, sizeof(name), "action#%d", stream_row_input_index(w->rows[i]));
+        dump_store(out, name, gtk_drop_down_get_model(GTK_DROP_DOWN(stream_row_action_dropdown(w->rows[i]))));
+        g_snprintf(name, sizeof(name), "encoder#%d", stream_row_input_index(w->rows[i]));
+        dump_store(out, name, gtk_drop_down_get_model(GTK_DROP_DOWN(stream_row_encoder_dropdown(w->rows[i]))));
+    }
+    g_file_set_contents(path, out->str, out->len, NULL);
+    g_string_free(out, TRUE);
+}
+
+/* FFCONV_TEST_POPUP=container | action<N> | encoder<N>: open that dropdown,
+ * save its popup to FFCONV_TEST_POPUP_SHOT, then quit. */
+static GtkWidget *test_popup_dropdown(ConvWindow *w)
+{
+    const char *which = ui_test_env("FFCONV_TEST_POPUP");
+
+    if (!strcmp(which, "container"))
+        return w->container_dd;
+    for (int i = 0; i < w->nb_rows; i++) {
+        char a[32], e[32];
+        g_snprintf(a, sizeof(a), "action%d", stream_row_input_index(w->rows[i]));
+        g_snprintf(e, sizeof(e), "encoder%d", stream_row_input_index(w->rows[i]));
+        if (!strcmp(which, a))
+            return stream_row_action_dropdown(w->rows[i]);
+        if (!strcmp(which, e))
+            return stream_row_encoder_dropdown(w->rows[i]);
+    }
+    return NULL;
+}
+
+static gboolean test_popup_shot(gpointer data)
+{
+    ConvWindow *w = data;
+    GtkWidget *dd = test_popup_dropdown(w);
+
+    for (GtkWidget *c = dd ? gtk_widget_get_first_child(dd) : NULL; c; c = gtk_widget_get_next_sibling(c))
+        if (GTK_IS_POPOVER(c) && ui_test_env("FFCONV_TEST_POPUP_SHOT"))
+            ui_save_snapshot(c, ui_test_env("FFCONV_TEST_POPUP_SHOT"));
+    g_timeout_add(100, test_step_done, w);
+    return G_SOURCE_REMOVE;
+}
+
+static void test_open_popup(ConvWindow *w)
+{
+    GtkWidget *dd = test_popup_dropdown(w);
+
+    if (dd)
+        g_signal_emit_by_name(dd, "activate");   /* pops the list up */
+    g_timeout_add(800, test_popup_shot, w);
+}
 
 static gboolean test_close_dialog(gpointer data)
 {
@@ -671,6 +810,12 @@ static gboolean test_step(gpointer data)
     }
     if (shot)
         ui_save_snapshot(GTK_WIDGET(w->win), shot);
+    if (ui_test_env("FFCONV_TEST_STATES_FILE"))
+        test_write_states(w, ui_test_env("FFCONV_TEST_STATES_FILE"));
+    if (ui_test_env("FFCONV_TEST_POPUP")) {
+        test_open_popup(w);
+        return G_SOURCE_REMOVE;
+    }
     if (ui_test_env("FFCONV_TEST_CONVERT") && gtk_widget_get_sensitive(w->convert_btn))
         start_conversion(w);
     else
@@ -726,6 +871,8 @@ static void on_probed(GObject *src, GAsyncResult *res, gpointer data)
 
     gtk_widget_set_sensitive(w->output_grid, TRUE);
     rebuild_rows(w);
+    update_container_states(w);
+    fit_stream_list(w);
     schedule_validate(w);
 
     if (ui_test_env("FFCONV_TEST_INPUT"))
@@ -904,6 +1051,8 @@ static void on_destroy(GtkWidget *widget, gpointer data)
         stream_row_free(w->rows[i]);
     g_free(w->rows);
     g_free(w->containers);
+    if (w->container_store)
+        g_object_unref(w->container_store);
     g_hash_table_unref(w->mux_options);
     g_strfreev(w->test_options);
     mi_free(&w->mi);
@@ -967,6 +1116,7 @@ ConvWindow *conv_window_new(GtkApplication *app, const Caps *caps)
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
         gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(scroll), TRUE);
         gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(scroll), 320);
+        w->stream_scroll = scroll;
         gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), w->stream_list);
         gtk_frame_set_child(GTK_FRAME(frame), scroll);
     }

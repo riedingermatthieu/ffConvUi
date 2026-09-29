@@ -121,22 +121,39 @@ typedef struct CapsMuxerFit {
 int caps_muxers_for(const Caps *c, const MediaInfo *mi, CapsMuxerFit **out, int *nb);
 
 /* What can be done with one input stream when writing to muxer `m`. */
+/* Why an encoder cannot be used (compat == CAPS_NO). */
+typedef enum CapsReason {
+    CAPS_REASON_NONE,
+    CAPS_REASON_CONTAINER,       /* the container cannot store its codec */
+    CAPS_REASON_SUBTITLE_KIND,   /* text <-> bitmap subtitles */
+} CapsReason;
+
 typedef struct CapsEncChoice {
     const CapsEncoder *enc;
     CapsCompat         compat;
+    CapsReason         reason;
 } CapsEncChoice;
 
 typedef struct CapsStreamActions {
     CapsCompat     copy;           /* stream copy without re-encoding */
     int            can_transcode;  /* a decoder exists and the type is transcodable */
-    CapsEncChoice *encoders;       /* sorted: YES first, common first, then name */
+    CapsEncChoice *encoders;       /* sorted: YES, MAYBE, then NO; common first, then name */
     int            nb_encoders;
     const char    *note;           /* human-readable reason when limited, may be NULL */
 } CapsStreamActions;
 
+enum {
+    CAPS_ACTIONS_EXPERIMENTAL = 1 << 0,  /* include experimental encoders */
+    CAPS_ACTIONS_INCOMPATIBLE = 1 << 1,  /* include encoders that cannot be used here
+                                            (compat CAPS_NO, with a reason) */
+};
+
 int  caps_stream_actions(const Caps *c, const CapsMuxer *m, const MediaStream *s,
-                         int include_experimental, CapsStreamActions *out);
+                         unsigned flags, CapsStreamActions *out);
 void caps_stream_actions_free(CapsStreamActions *a);
+
+/* Can muxer `m` store stream `s` as is (stream copy)? */
+CapsCompat caps_copy_compat(const CapsMuxer *m, const MediaStream *s);
 
 /* The default choice for a stream: copy when the container is known to accept
  * it, else the first software encoder known to fit, else drop. */

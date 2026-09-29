@@ -1,5 +1,10 @@
 /*
  * stream_row.c - stream table row.
+ *
+ * Every action and every encoder of the stream's type is listed. Those the
+ * current container cannot take are greyed out, with the reason, but stay
+ * selectable: nothing is changed behind the user's back, validation reports
+ * the problem and keeps Convert disabled.
  */
 #include "stream_row.h"
 
@@ -7,17 +12,17 @@
 
 #include <libavutil/avutil.h>
 
+#include "choice_item.h"
+
 struct StreamRow {
     const MediaStream  *ms;
     GtkWidget          *box;
     GtkWidget          *action_dd;
     GtkWidget          *encoder_dd;
-    JobAction           actions[3];      /* dropdown position -> action */
-    int                 nb_actions;
-    const CapsEncoder **encoders;        /* dropdown position -> encoder */
     GtkWidget          *options_btn;
+    GListStore         *actions;         /* ConvChoiceItem, data: GINT_TO_POINTER(action + 1) */
+    GListStore         *encoders;        /* ConvChoiceItem, data: const CapsEncoder * */
     GHashTable         *options;         /* encoder name -> OptBox (only what the user set) */
-    int                 nb_encoders;
     StreamRowChanged    changed;
     void               *user;
 };
@@ -81,13 +86,63 @@ char *stream_describe(const MediaStream *ms)
     return g_string_free(s, FALSE);
 }
 
-static const char *action_label(JobAction a)
+/* ------------------------------------------------------------------------- */
+/* current choice                                                            */
+
+static ConvChoiceItem *selected_item(GtkWidget *dd)
 {
-    switch (a) {
-    case JOB_COPY:      return "Copy";
-    case JOB_TRANSCODE: return "Convert";
-    default:            return "Drop";
+    return gtk_drop_down_get_selected_item(GTK_DROP_DOWN(dd));
+}
+
+JobAction stream_row_action(const StreamRow *row)
+{
+    ConvChoiceItem *it = selected_item(row->action_dd);
+    return it ? (JobAction)(GPOINTER_TO_INT(conv_choice_item_get_data(it)) - 1) : JOB_DROP;
+}
+
+static const CapsEncoder *current_encoder(const StreamRow *row)
+{
+    ConvChoiceItem *it;
+
+    if (stream_row_action(row) != JOB_TRANSCODE || !(it = selected_item(row->encoder_dd)))
+        return NULL;
+    return conv_choice_item_get_data(it);
+}
+
+const char *stream_row_encoder(const StreamRow *row)
+{
+    const CapsEncoder *enc = current_encoder(row);
+    return enc ? enc->name : NULL;
+}
+
+int stream_row_input_index(const StreamRow *row)
+{
+    return row->ms->index;
+}
+
+GtkWidget *stream_row_widget(const StreamRow *row)
+{
+    return row->box;
+}
+
+gboolean stream_row_fits(const StreamRow *row, const CapsMuxer *m, char *why, size_t size)
+{
+    const CapsEncoder *enc;
+    JobAction a = stream_row_action(row);
+
+    if (a == JOB_DROP)
+        return TRUE;
+    if (a == JOB_COPY) {
+        if (caps_copy_compat(m, row->ms) != CAPS_NO)
+            return TRUE;
+        g_snprintf(why, size, "cannot store stream #%d as is (%s)", row->ms->index, row->ms->codec_name);
+        return FALSE;
     }
+    if (!(enc = current_encoder(row)) || caps_mux_codec(m, enc->id) != CAPS_NO)
+        return TRUE;   /* no encoder chosen: not the container's fault */
+    g_snprintf(why, size, "cannot store stream #%d as %s (%s)", row->ms->index,
+               avcodec_get_name(enc->id), enc->name);
+    return FALSE;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -103,16 +158,6 @@ static void opt_box_free(gpointer data)
 
     av_dict_free(&b->dict);
     g_free(b);
-}
-
-static const CapsEncoder *current_encoder(const StreamRow *row)
-{
-    guint i;
-
-    if (stream_row_action(row) != JOB_TRANSCODE)
-        return NULL;
-    i = gtk_drop_down_get_selected(GTK_DROP_DOWN(row->encoder_dd));
-    return i < (guint)row->nb_encoders ? row->encoders[i] : NULL;
 }
 
 static OptBox *current_box(StreamRow *row, gboolean create)
@@ -140,6 +185,7 @@ static void update_options_label(StreamRow *row)
     else
         g_strlcpy(label, "Options", sizeof(label));
     gtk_button_set_label(GTK_BUTTON(row->options_btn), label);
+    gtk_widget_set_sensitive(row->options_btn, current_encoder(row) != NULL);
 }
 
 static void on_options_edited(void *data)
@@ -208,61 +254,108 @@ static void on_encoder_changed(GObject *obj, GParamSpec *pspec, gpointer data)
         row->changed(row->user);
 }
 
+/* Actions: always the three; greyed when the container cannot take them. */
+static guint fill_actions(StreamRow *row, const CapsMuxer *mux, const CapsStreamActions *act,
+                          int prev_action, CapsDefault def)
+{
+    static const JobAction order[] = { JOB_COPY, JOB_TRANSCODE, JOB_DROP };
+    guint sel = 0;
+    int nb_ok = 0;
+
+    for (int i = 0; i < act->nb_encoders; i++)
+        nb_ok += act->encoders[i].compat != CAPS_NO;
+
+    for (guint i = 0; i < G_N_ELEMENTS(order); i++) {
+        JobAction a = order[i];
+        ConvChoiceItem *it;
+        char reason[256] = "";
+        const char *label = a == JOB_COPY ? (act->copy == CAPS_MAYBE ? "Copy (?)" : "Copy")
+                          : a == JOB_TRANSCODE ? "Convert" : "Drop";
+        gboolean ok = TRUE;
+
+        if (a == JOB_COPY && act->copy == CAPS_NO) {
+            ok = FALSE;
+            if (row->ms->type == AVMEDIA_TYPE_ATTACHMENT)
+                g_strlcpy(reason, "Only Matroska stores attachments", sizeof(reason));
+            else
+                g_snprintf(reason, sizeof(reason), "%s cannot store %s as is: convert it or choose "
+                           "another container", mux->key, row->ms->codec_name[0] ? row->ms->codec_name : "this codec");
+        } else if (a == JOB_TRANSCODE && (!act->can_transcode || !nb_ok)) {
+            ok = FALSE;
+            g_snprintf(reason, sizeof(reason), "%s", act->note ? act->note : "cannot be converted");
+            reason[0] = g_ascii_toupper(reason[0]);
+        }
+
+        it = conv_choice_item_new(label, GINT_TO_POINTER(a + 1));
+        conv_choice_item_set_state(it, ok, ok ? NULL : reason);
+        g_list_store_append(row->actions, it);
+        g_object_unref(it);
+
+        if ((prev_action >= 0 && (int)a == prev_action) ||
+            (prev_action < 0 && ((def == CAPS_DEFAULT_COPY && a == JOB_COPY) ||
+                                 (def == CAPS_DEFAULT_TRANSCODE && a == JOB_TRANSCODE) ||
+                                 (def == CAPS_DEFAULT_DROP && a == JOB_DROP))))
+            sel = i;
+    }
+    return sel;
+}
+
+/* Encoders: every one of the stream's type, possible ones first. */
+static guint fill_encoders(StreamRow *row, const CapsMuxer *mux, const CapsStreamActions *act,
+                           const char *prev_encoder, const CapsEncoder *def_enc)
+{
+    guint sel = GTK_INVALID_LIST_POSITION, def_pos = 0;
+
+    for (int i = 0; i < act->nb_encoders; i++) {
+        const CapsEncChoice *c = &act->encoders[i];
+        ConvChoiceItem *it;
+        char label[128], reason[256] = "";
+
+        g_snprintf(label, sizeof(label), "%s%s%s", c->enc->name, c->enc->is_hardware ? " (hardware)" : "",
+                   c->compat == CAPS_MAYBE ? " (?)" : "");
+        if (c->reason == CAPS_REASON_SUBTITLE_KIND)
+            g_snprintf(reason, sizeof(reason), "%s subtitles cannot become %s subtitles",
+                       row->ms->is_text_sub ? "Text" : "Bitmap", row->ms->is_text_sub ? "bitmap" : "text");
+        else if (c->compat == CAPS_NO)
+            g_snprintf(reason, sizeof(reason), "%s cannot store %s", mux->key, avcodec_get_name(c->enc->id));
+
+        it = conv_choice_item_new(label, c->enc);
+        conv_choice_item_set_state(it, c->compat != CAPS_NO, reason);
+        g_list_store_append(row->encoders, it);
+        g_object_unref(it);
+
+        if (prev_encoder && !strcmp(prev_encoder, c->enc->name))
+            sel = i;
+        if (c->enc == def_enc)
+            def_pos = i;
+    }
+    return sel != GTK_INVALID_LIST_POSITION ? sel : def_pos;
+}
+
 StreamRow *stream_row_new(const Caps *caps, const CapsMuxer *mux, const MediaStream *ms,
                           GHashTable *options,
                           int prev_action, const char *prev_encoder,
                           StreamRowChanged changed, void *user)
 {
     StreamRow *row = g_new0(StreamRow, 1);
-    GtkStringList *actions = gtk_string_list_new(NULL);
-    GtkStringList *encoders = gtk_string_list_new(NULL);
-    GtkWidget *icon, *index, *details;
     CapsStreamActions act = { 0 };
     const CapsEncoder *def_enc = NULL;
     CapsDefault def = CAPS_DEFAULT_DROP;
-    guint sel_action = 0, sel_encoder = 0;
+    GtkWidget *icon, *index, *details;
+    guint sel_action, sel_encoder;
     char *desc, *markup;
 
-    row->ms = ms;
-    row->options = options ? options
-                           : g_hash_table_new_full(g_str_hash, g_str_equal, g_free, opt_box_free);
+    row->ms       = ms;
+    row->options  = options ? options
+                            : g_hash_table_new_full(g_str_hash, g_str_equal, g_free, opt_box_free);
+    row->actions  = g_list_store_new(CONV_TYPE_CHOICE_ITEM);
+    row->encoders = g_list_store_new(CONV_TYPE_CHOICE_ITEM);
 
-    if (caps_stream_actions(caps, mux, ms, 0, &act) >= 0)
+    if (caps_stream_actions(caps, mux, ms, CAPS_ACTIONS_INCOMPATIBLE, &act) >= 0)
         def = caps_default_action(&act, &def_enc);
-
-    /* actions the container allows */
-    if (act.copy != CAPS_NO)
-        row->actions[row->nb_actions++] = JOB_COPY;
-    if (act.can_transcode && act.nb_encoders)
-        row->actions[row->nb_actions++] = JOB_TRANSCODE;
-    row->actions[row->nb_actions++] = JOB_DROP;
-    for (int i = 0; i < row->nb_actions; i++) {
-        JobAction a = row->actions[i];
-        char label[64];
-        g_snprintf(label, sizeof(label), "%s%s", action_label(a),
-                   a == JOB_COPY && act.copy == CAPS_MAYBE ? " (?)" : "");
-        gtk_string_list_append(actions, label);
-        if ((prev_action >= 0 && (int)a == prev_action) ||
-            (prev_action < 0 && ((def == CAPS_DEFAULT_COPY && a == JOB_COPY) ||
-                                 (def == CAPS_DEFAULT_TRANSCODE && a == JOB_TRANSCODE) ||
-                                 (def == CAPS_DEFAULT_DROP && a == JOB_DROP))))
-            sel_action = i;
-    }
-
-    /* encoders, best first */
-    row->encoders = g_new0(const CapsEncoder *, act.nb_encoders ? act.nb_encoders : 1);
-    for (int i = 0; i < act.nb_encoders; i++) {
-        const CapsEncChoice *c = &act.encoders[i];
-        char label[128];
-        g_snprintf(label, sizeof(label), "%s%s%s", c->enc->name,
-                   c->enc->is_hardware ? " (hardware)" : "", c->compat == CAPS_MAYBE ? " (?)" : "");
-        gtk_string_list_append(encoders, label);
-        row->encoders[row->nb_encoders] = c->enc;
-        if ((prev_encoder && !strcmp(prev_encoder, c->enc->name)) ||
-            (!prev_encoder && c->enc == def_enc))
-            sel_encoder = row->nb_encoders;
-        row->nb_encoders++;
-    }
+    sel_action  = fill_actions(row, mux, &act, prev_action, def);
+    sel_encoder = fill_encoders(row, mux, &act, prev_encoder, def_enc);
+    caps_stream_actions_free(&act);
 
     /* widgets */
     row->box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
@@ -290,17 +383,15 @@ StreamRow *stream_row_new(const Caps *caps, const CapsMuxer *mux, const MediaStr
     gtk_widget_set_hexpand(details, TRUE);
     gtk_box_append(GTK_BOX(row->box), details);
 
-    row->action_dd = gtk_drop_down_new(G_LIST_MODEL(actions), NULL);
+    row->action_dd = conv_choice_dropdown_new(row->actions, FALSE);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(row->action_dd), sel_action);
-    if (act.note)
-        gtk_widget_set_tooltip_text(row->action_dd, act.note);
+    gtk_widget_set_size_request(row->action_dd, 120, -1);
     gtk_box_append(GTK_BOX(row->box), row->action_dd);
 
-    row->encoder_dd = gtk_drop_down_new(G_LIST_MODEL(encoders),
-        gtk_property_expression_new(GTK_TYPE_STRING_OBJECT, NULL, "string"));
-    gtk_drop_down_set_enable_search(GTK_DROP_DOWN(row->encoder_dd), TRUE);
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(row->encoder_dd), sel_encoder);
-    gtk_widget_set_size_request(row->encoder_dd, 190, -1);
+    row->encoder_dd = conv_choice_dropdown_new(row->encoders, TRUE);
+    if (g_list_model_get_n_items(G_LIST_MODEL(row->encoders)))
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(row->encoder_dd), sel_encoder);
+    gtk_widget_set_size_request(row->encoder_dd, 210, -1);
     gtk_widget_set_tooltip_text(row->encoder_dd, "Encoder (type to search)");
     gtk_box_append(GTK_BOX(row->box), row->encoder_dd);
 
@@ -308,11 +399,10 @@ StreamRow *stream_row_new(const Caps *caps, const CapsMuxer *mux, const MediaStr
     gtk_widget_set_tooltip_text(row->options_btn, "Encoder options");
     g_signal_connect(row->options_btn, "clicked", G_CALLBACK(on_options_clicked), row);
     gtk_box_append(GTK_BOX(row->box), row->options_btn);
+
     gtk_widget_set_visible(row->encoder_dd, stream_row_action(row) == JOB_TRANSCODE);
     gtk_widget_set_visible(row->options_btn, stream_row_action(row) == JOB_TRANSCODE);
     update_options_label(row);
-
-    caps_stream_actions_free(&act);
 
     /* connect last: building the row must not fire change notifications */
     row->changed = changed;
@@ -333,40 +423,27 @@ void stream_row_free(StreamRow *row)
     if (row->options)
         g_hash_table_unref(row->options);
     g_object_unref(row->box);
-    g_free(row->encoders);
+    g_object_unref(row->actions);
+    g_object_unref(row->encoders);
     g_free(row);
-}
-
-GtkWidget *stream_row_widget(const StreamRow *row)
-{
-    return row->box;
-}
-
-int stream_row_input_index(const StreamRow *row)
-{
-    return row->ms->index;
-}
-
-JobAction stream_row_action(const StreamRow *row)
-{
-    guint i = gtk_drop_down_get_selected(GTK_DROP_DOWN(row->action_dd));
-    return i < (guint)row->nb_actions ? row->actions[i] : JOB_DROP;
 }
 
 gboolean stream_row_select(StreamRow *row, JobAction action, const char *encoder)
 {
-    int a = -1, e = -1;
+    guint a = conv_choice_find(G_LIST_MODEL(row->actions), GINT_TO_POINTER(action + 1));
 
-    for (int i = 0; i < row->nb_actions; i++)
-        if (row->actions[i] == action)
-            a = i;
-    if (a < 0)
+    if (a == GTK_INVALID_LIST_POSITION)
         return FALSE;
     if (action == JOB_TRANSCODE) {
-        for (int i = 0; encoder && i < row->nb_encoders; i++)
-            if (!strcmp(row->encoders[i]->name, encoder))
+        guint n = g_list_model_get_n_items(G_LIST_MODEL(row->encoders)), e = GTK_INVALID_LIST_POSITION;
+        for (guint i = 0; encoder && i < n; i++) {
+            ConvChoiceItem *it = g_list_model_get_item(G_LIST_MODEL(row->encoders), i);
+            const CapsEncoder *enc = conv_choice_item_get_data(it);
+            if (!strcmp(enc->name, encoder))
                 e = i;
-        if (e < 0)
+            g_object_unref(it);
+        }
+        if (e == GTK_INVALID_LIST_POSITION)
             return FALSE;
         gtk_drop_down_set_selected(GTK_DROP_DOWN(row->encoder_dd), e);
     }
@@ -374,12 +451,12 @@ gboolean stream_row_select(StreamRow *row, JobAction action, const char *encoder
     return TRUE;
 }
 
-const char *stream_row_encoder(const StreamRow *row)
+GtkWidget *stream_row_action_dropdown(const StreamRow *row)
 {
-    guint i;
+    return row->action_dd;
+}
 
-    if (stream_row_action(row) != JOB_TRANSCODE)
-        return NULL;
-    i = gtk_drop_down_get_selected(GTK_DROP_DOWN(row->encoder_dd));
-    return i < (guint)row->nb_encoders ? row->encoders[i]->name : NULL;
+GtkWidget *stream_row_encoder_dropdown(const StreamRow *row)
+{
+    return row->encoder_dd;
 }

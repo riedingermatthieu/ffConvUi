@@ -35,11 +35,18 @@ GHashTable *stream_row_take_options(StreamRow *row);
 GtkWindow  *stream_row_edit_options(StreamRow *row, OptionEditor **editor);
 
 GtkWidget   *stream_row_widget(const StreamRow *row);
+/* The action and encoder dropdowns (test hooks). */
+GtkWidget   *stream_row_action_dropdown(const StreamRow *row);
+GtkWidget   *stream_row_encoder_dropdown(const StreamRow *row);
 int          stream_row_input_index(const StreamRow *row);
 JobAction    stream_row_action(const StreamRow *row);
 const char  *stream_row_encoder(const StreamRow *row);   /* NULL unless transcoding */
 
-/* Select an action (and encoder) if the row offers it; returns FALSE otherwise. */
+/* Can muxer `m` store this stream as currently chosen? If not, *why says so
+ * ("cannot store stream #1 as is (opus)"). A dropped stream always fits. */
+gboolean     stream_row_fits(const StreamRow *row, const CapsMuxer *m, char *why, size_t size);
+
+/* Select an action (and encoder), greyed or not; FALSE if the row has no such choice. */
 gboolean     stream_row_select(StreamRow *row, JobAction action, const char *encoder);
 
 /* One-line description of a stream ("h264 (High) · 1920×1080 · 29.97 fps"). */
