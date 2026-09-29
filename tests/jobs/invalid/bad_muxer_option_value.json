@@ -1,0 +1,1 @@
+{ "_expect": "muxer mp4: invalid value ..fastest. for .movflags.", "input": "tests/media/m3_in.mkv", "output": "build/v.mp4", "overwrite": true, "muxer_options": { "movflags": "+fastest" }, "streams": [ { "input": 0, "action": "copy" } ] }

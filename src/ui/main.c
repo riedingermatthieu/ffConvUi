@@ -1,5 +1,5 @@
 /*
- * ffconv - GTK 4 front end for the converter core (milestone M5).
+ * ffconv - GTK 4 front end for the converter core (milestones M5-M6).
  *
  *   ffconv [file]
  *
@@ -7,9 +7,13 @@
  *   FFCONV_TEST_INPUT=<file>          open this file at startup
  *   FFCONV_TEST_CONTAINER=<key>       then select this container
  *   FFCONV_TEST_STREAMS=0=libx264,1=copy,2=drop   then set the streams' actions
+ *   FFCONV_TEST_OPTIONS=0:crf=30;0:preset=fast;mux:movflags=+faststart
+ *                                     then set options through the option dialogs
+ *   FFCONV_TEST_OPTIONS_SHOT=<png>    save the first option dialog to a PNG
  *   FFCONV_TEST_OUTPUT=<file>         then set this output (and "overwrite")
  *   FFCONV_TEST_SHOT=<png>            then save the main window to a PNG
  *   FFCONV_TEST_CONVERT=1             then click Convert, and quit when done
+ *   FFCONV_TEST_JOB_JSON=<file>       write the job Convert runs, as JSON
  *   FFCONV_TEST_PROGRESS_SHOT=<png>   save the progress window at >= 30 %
  *   FFCONV_TEST_DONE_SHOT=<png>       save the progress window when done
  *   FFCONV_TEST_CANCEL_AT=<percent>   press Cancel once progress reaches it

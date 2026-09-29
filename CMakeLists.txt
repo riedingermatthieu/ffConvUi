@@ -55,6 +55,7 @@ if(GTK4_FOUND)
         src/ui/main.c
         src/ui/window.c
         src/ui/stream_row.c
+        src/ui/option_editor.c
         src/ui/progress.c
         src/ui/uilog.c
         src/ui/ui_util.c)
@@ -120,7 +121,11 @@ if(GTK4_FOUND AND CONV_GUI_TESTS)
              COMMAND ${CMAKE_COMMAND} -DFFCONV=$<TARGET_FILE:ffconv> -DOUT_DIR=${CMAKE_CURRENT_BINARY_DIR}
                      -DMODE=convert -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/media/m3_in.mkv
                      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_test.cmake)
-    set_tests_properties(ui_empty ui_open ui_convert PROPERTIES LABELS gui RUN_SERIAL TRUE)
+    add_test(NAME ui_options
+             COMMAND ${CMAKE_COMMAND} -DFFCONV=$<TARGET_FILE:ffconv> -DOUT_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                     -DMODE=options -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/media/m3_in.mkv
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_test.cmake)
+    set_tests_properties(ui_empty ui_open ui_convert ui_options PROPERTIES LABELS gui RUN_SERIAL TRUE)
 endif()
 
 # Jobs in tests/jobs/invalid must fail validation with the message in "_expect".

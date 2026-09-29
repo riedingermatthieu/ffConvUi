@@ -1,4 +1,4 @@
-# ffconv: FFmpeg converter (M1–M5)
+# ffconv: FFmpeg converter (M1–M6)
 
 A C11 library (`convcore`) that uses the FFmpeg API to describe an input file,
 list every conversion the linked FFmpeg build can do with it, check and run a
@@ -15,7 +15,7 @@ built on the same library.
 | `src/core/validate.*` | M4 | Checks a job before running it: static checks, then a dry run; reports every problem with its stream and field. |
 | `src/core/logcap.*` | M4 | Captures FFmpeg's log per thread, so errors carry FFmpeg's own reason. |
 | `src/cli/convcli.c` | M1–M4 | Test front end. |
-| `src/ui/*` | M5 | GTK 4 application: main window, stream rows, progress window, FFmpeg log view. |
+| `src/ui/*` | M5–M6 | GTK 4 application: main window, stream rows, option editor, progress window, FFmpeg log view. |
 
 ## Build (Windows, MSYS2 MINGW64)
 
@@ -38,7 +38,7 @@ MSYS2 MINGW64 shell (it needs the FFmpeg and GTK DLLs from `mingw64/bin`):
 ./build/ffconv.exe [file]
 ```
 
-`-DCONV_GUI_TESTS=ON` adds three UI tests (`ctest -L gui`); they open windows.
+`-DCONV_GUI_TESTS=ON` adds four UI tests (`ctest -L gui`); they open windows.
 
 The tests use the synthetic files in [tests/media](tests/media) and the jobs in
 [tests/jobs](tests/jobs); see [tests/README.md](tests/README.md) for what each
@@ -146,8 +146,10 @@ Result: 2 error(s), 1 warning(s), dry run failed - the job would fail
   paths (input readable, output folder exists, not the input, overwrite),
   container ↔ codec for copies and encoders, encoder/filter/muxer names with
   "did you mean" suggestions, option names (plus hints for ffmpeg CLI syntax
-  such as `q` or `b:v`), subtitle kinds, filter classes and media types, and
-  filter option values (the chain is parsed in a scratch graph).
+  such as `q` or `b:v`), encoder and muxer option values (set on a scratch
+  context, on the object FFmpeg gives them to), subtitle kinds, filter
+  classes and media types, and filter option values (the chain is parsed in a
+  scratch graph).
 * **Dry run** (when the static pass found no error): each stream is set up
   alone with `engine_dry_run()` (decoder, filters, encoder with the real
   option values, muxer header written to a null sink), then the whole job with
@@ -178,6 +180,39 @@ Result: 2 error(s), 1 warning(s), dry run failed - the job would fail
 The UI can be driven without a user through `FFCONV_TEST_*` environment
 variables (open a file, pick a container and actions, convert, cancel, save
 window snapshots as PNG); see the top of [src/ui/main.c](src/ui/main.c).
+
+## Option editor (M6)
+
+*Options* next to a converted stream (or next to the container) opens an
+editor generated from FFmpeg's own option descriptions, so it works for every
+encoder and muxer without hard-coding any:
+
+* Sections: **Common** (bitrate, rate control, GOP, B-frames, sample rate,
+  channel layout, threads… and **Quality**), the encoder's or muxer's **own
+  options**, then the **other general options**. A search box filters them.
+* Widgets follow the option type: spin buttons for bounded numbers, text
+  fields for unbounded ones (so `2M`, `96k` work), dropdowns with a
+  "Default (…)" entry for booleans and named values, checkboxes for flags,
+  text fields for the rest. A reset button appears on every changed option.
+* Defaults are the encoder's own (read from a context created for it:
+  libx264 shows no fixed bitrate, not FFmpeg's generic 200 kb/s).
+* When an encoder option and a generic option share a name (x264's `profile`),
+  only the one FFmpeg applies is shown (private for encoders, generic for
+  muxers).
+* Values are checked as you type, on a scratch context: a value FFmpeg
+  refuses turns red, with FFmpeg's reason as a tooltip.
+* **Quality** is the ffmpeg CLI's `-q`: it sets `global_quality` (q × 118) and
+  the `qscale` flag.
+* Only changed options are stored, per encoder (switching encoder and back
+  keeps them) and per container; the buttons show how many are set.
+
+Checked end to end through the dialogs' widgets: libx264 (`crf`, `preset`,
+`tune`, `bf`, `profile`: all visible in x264's settings in the output), aac
+(`b=96k` → 97 kb/s, `aac_coder`), libopus (`b=64k` → 59 kb/s in constrained
+VBR, `frame_duration=40` → 40 ms packets), libvpx-vp9 (`crf=45`/`b=0` →
+1561 kb/s against 6317 kb/s at crf 20, `deadline`, `cpu-used`, `row-mt`),
+MP4 `movflags=faststart` (moov before mdat), libvorbis Quality (q 0 / 2 / 10
+→ 56 / 71 / 364 kb/s, the same as `ffmpeg -q:a`).
 
 ## How "what is possible" is decided
 
@@ -227,8 +262,7 @@ window snapshots as PNG); see the top of [src/ui/main.c](src/ui/main.c).
 
 ## Known limitations
 
-* UI: encoder/muxer options (M6) and filters (M7) cannot be edited yet;
-  conversions use each encoder's defaults. Trim, metadata editing and presets
+* UI: filters cannot be edited yet (M7). Trim, metadata editing and presets
   are M8.
 * UI: `ffconv.exe` only runs where the MSYS2 `mingw64/bin` DLLs are found (no
   installer or bundled DLLs yet).

@@ -16,6 +16,7 @@
 #include <libavutil/avstring.h>
 
 #include "job.h"
+#include "option_editor.h"
 #include "probe.h"
 #include "progress.h"
 #include "stream_row.h"
@@ -36,6 +37,8 @@ struct ConvWindow {
     GtkWidget       *stream_list;
     GtkWidget       *output_grid;
     GtkWidget       *container_dd;
+    GtkWidget       *mux_options_btn;
+    GHashTable      *mux_options;      /* muxer key -> OptBox (only what the user set) */
     const CapsMuxer **containers;      /* dropdown position -> muxer */
     int              nb_containers;
     GtkWidget       *output_entry, *overwrite_check;
@@ -50,6 +53,9 @@ struct ConvWindow {
     int              converting;
     int              loading;
     int              updating;         /* programmatic widget changes: no callbacks */
+    char           **test_options;     /* FFCONV_TEST_OPTIONS groups still to apply */
+    int              test_option_step;
+    GtkWindow       *test_dialog;
 };
 
 static void schedule_validate(ConvWindow *w);
@@ -94,6 +100,79 @@ static void clear_box(GtkWidget *box)
 /* ------------------------------------------------------------------------- */
 /* job <- widgets                                                            */
 
+/* ------------------------------------------------------------------------- */
+/* muxer options, kept per container                                         */
+
+typedef struct OptBox {
+    AVDictionary *dict;
+} OptBox;
+
+static void opt_box_free(gpointer data)
+{
+    OptBox *b = data;
+
+    av_dict_free(&b->dict);
+    g_free(b);
+}
+
+static OptBox *mux_box(ConvWindow *w, gboolean create)
+{
+    OptBox *b;
+
+    if (!w->mux)
+        return NULL;
+    if (!(b = g_hash_table_lookup(w->mux_options, w->mux->key)) && create) {
+        b = g_new0(OptBox, 1);
+        g_hash_table_insert(w->mux_options, g_strdup(w->mux->key), b);
+    }
+    return b;
+}
+
+static const AVDictionary *current_mux_options(ConvWindow *w)
+{
+    OptBox *b = mux_box(w, FALSE);
+    return b ? b->dict : NULL;
+}
+
+static void update_mux_options_label(ConvWindow *w)
+{
+    int n = av_dict_count(current_mux_options(w));
+    char label[32];
+
+    if (n)
+        g_snprintf(label, sizeof(label), "Options (%d)", n);
+    else
+        g_strlcpy(label, "Options", sizeof(label));
+    gtk_button_set_label(GTK_BUTTON(w->mux_options_btn), label);
+}
+
+static void on_mux_options_edited(void *user)
+{
+    ConvWindow *w = user;
+
+    update_mux_options_label(w);
+    schedule_validate(w);
+}
+
+static GtkWindow *edit_mux_options(ConvWindow *w, OptionEditor **editor)
+{
+    OptBox *b = mux_box(w, TRUE);
+    OptionTarget t = { 0 };
+
+    if (!b)
+        return NULL;
+    t.muxer     = w->mux->fmt;
+    t.muxer_key = w->mux->key;
+    return option_dialog_show(w->win, t, &b->dict, on_mux_options_edited, w, editor);
+}
+
+static void on_mux_options_clicked(GtkButton *btn, gpointer data)
+{
+    edit_mux_options(data, NULL);
+}
+
+/* ------------------------------------------------------------------------- */
+
 static ConvJob *build_job(ConvWindow *w)
 {
     ConvJob *job;
@@ -106,6 +185,8 @@ static ConvJob *build_job(ConvWindow *w)
     job->overwrite = gtk_check_button_get_active(GTK_CHECK_BUTTON(w->overwrite_check));
     if (!job->input || !job->output || !job->muxer)
         goto fail;
+    if (current_mux_options(w) && av_dict_copy(&job->muxer_options, current_mux_options(w), 0) < 0)
+        goto fail;
 
     for (int i = 0; i < w->nb_rows; i++) {
         JobAction a = stream_row_action(w->rows[i]);
@@ -115,7 +196,8 @@ static ConvJob *build_job(ConvWindow *w)
             continue;   /* unlisted streams are dropped */
         if (!(js = job_add_stream(job, stream_row_input_index(w->rows[i]), a)))
             goto fail;
-        if (a == JOB_TRANSCODE && !(js->encoder = av_strdup(stream_row_encoder(w->rows[i]))))
+        if (a == JOB_TRANSCODE && (!(js->encoder = av_strdup(stream_row_encoder(w->rows[i]))) ||
+                                   av_dict_copy(&js->encoder_options, stream_row_options(w->rows[i]), 0) < 0))
             goto fail;
     }
     return job;
@@ -229,6 +311,7 @@ static void rebuild_rows(ConvWindow *w)
     int nb = w->mi ? w->mi->nb_streams : 0;
     int *prev_action = g_new0(int, nb ? nb : 1);
     char **prev_encoder = g_new0(char *, nb ? nb : 1);
+    GHashTable **prev_options = g_new0(GHashTable *, nb ? nb : 1);
 
     /* keep the user's choices where the new container allows them */
     for (int i = 0; i < nb; i++)
@@ -238,6 +321,7 @@ static void rebuild_rows(ConvWindow *w)
         if (idx < nb) {
             prev_action[idx]  = stream_row_action(w->rows[i]);
             prev_encoder[idx] = g_strdup(stream_row_encoder(w->rows[i]));
+            prev_options[idx] = stream_row_take_options(w->rows[i]);
         }
     }
 
@@ -251,20 +335,36 @@ static void rebuild_rows(ConvWindow *w)
     if (w->mi && w->mux) {
         w->rows = g_new0(StreamRow *, nb ? nb : 1);
         for (int i = 0; i < nb; i++) {
-            StreamRow *row = stream_row_new(w->caps, w->mux, &w->mi->streams[i], prev_action[i],
-                                            prev_encoder[i], on_row_changed, w);
+            StreamRow *row = stream_row_new(w->caps, w->mux, &w->mi->streams[i], prev_options[i],
+                                            prev_action[i], prev_encoder[i], on_row_changed, w);
             GtkWidget *lbrow;
 
+            prev_options[i] = NULL;   /* taken over by the new row */
             w->rows[w->nb_rows++] = row;
             gtk_list_box_append(GTK_LIST_BOX(w->stream_list), stream_row_widget(row));
             lbrow = gtk_widget_get_parent(stream_row_widget(row));
             gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(lbrow), FALSE);
         }
     }
-    for (int i = 0; i < nb; i++)
+    for (int i = 0; i < nb; i++) {
         g_free(prev_encoder[i]);
+        if (prev_options[i])
+            g_hash_table_unref(prev_options[i]);
+    }
+    g_free(prev_options);
     g_free(prev_encoder);
     g_free(prev_action);
+}
+
+/* A new file: nothing from the previous file's streams carries over. */
+static void clear_rows(ConvWindow *w)
+{
+    gtk_list_box_remove_all(GTK_LIST_BOX(w->stream_list));
+    for (int i = 0; i < w->nb_rows; i++)
+        stream_row_free(w->rows[i]);
+    g_free(w->rows);
+    w->rows    = NULL;
+    w->nb_rows = 0;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -301,6 +401,7 @@ static void on_container_changed(GObject *obj, GParamSpec *pspec, gpointer data)
     set_output_extension(w, old, w->mux);
     w->updating = 0;
     rebuild_rows(w);
+    update_mux_options_label(w);
     schedule_validate(w);
 }
 
@@ -376,6 +477,70 @@ static void on_progress_finished(int ret, void *user);
 static void start_conversion(ConvWindow *w);
 
 /* FFCONV_TEST_*: drive the window without a user (see main.c) */
+static gboolean test_step(gpointer data);
+
+static gboolean test_close_dialog(gpointer data)
+{
+    ConvWindow *w = data;
+    const char *shot = ui_test_env("FFCONV_TEST_OPTIONS_SHOT");
+
+    if (w->test_dialog) {
+        if (shot && !w->test_option_step++)      /* the first dialog only */
+            ui_save_snapshot(GTK_WIDGET(w->test_dialog), shot);
+        gtk_window_destroy(w->test_dialog);
+        w->test_dialog = NULL;
+    }
+    g_timeout_add(400, test_step, w);
+    return G_SOURCE_REMOVE;
+}
+
+/* FFCONV_TEST_OPTIONS="0:crf=30;0:preset=veryfast;mux:movflags=+faststart":
+ * open the option dialog of the first target (stream index or "mux"), set its
+ * values through the widgets, close it, and leave the rest for the next step. */
+static void test_options_step(ConvWindow *w)
+{
+    char **items = g_strsplit(ui_test_env("FFCONV_TEST_OPTIONS"), ";", -1);
+    GString *rest = g_string_new(NULL);
+    OptionEditor *ed = NULL;
+    char *target = NULL;
+
+    for (char **it = items; *it; it++) {
+        const char *colon = strchr(*it, ':'), *eq;
+        char *tgt, *name;
+
+        if (!colon || !(eq = strchr(colon, '=')))
+            continue;
+        tgt = g_strndup(*it, colon - *it);
+        if (!target) {
+            target = g_strdup(tgt);
+            if (!strcmp(target, "mux")) {
+                w->test_dialog = edit_mux_options(w, &ed);
+            } else {
+                for (int i = 0; i < w->nb_rows; i++)
+                    if (stream_row_input_index(w->rows[i]) == atoi(target))
+                        w->test_dialog = stream_row_edit_options(w->rows[i], &ed);
+            }
+        }
+        if (strcmp(tgt, target)) {
+            g_string_append_printf(rest, "%s%s", rest->len ? ";" : "", *it);
+        } else if (ed) {
+            name = g_strndup(colon + 1, eq - colon - 1);
+            if (!option_editor_set_text(ed, name, eq + 1))
+                g_printerr("test: cannot set %s=%s\n", name, eq + 1);
+            g_free(name);
+        }
+        g_free(tgt);
+    }
+    if (rest->len)
+        g_setenv("FFCONV_TEST_OPTIONS", rest->str, TRUE);
+    else
+        g_unsetenv("FFCONV_TEST_OPTIONS");
+    g_string_free(rest, TRUE);
+    g_free(target);
+    g_strfreev(items);
+    g_timeout_add(500, test_close_dialog, w);
+}
+
 static gboolean test_step(gpointer data)
 {
     ConvWindow *w = data;
@@ -414,6 +579,10 @@ static gboolean test_step(gpointer data)
         g_strfreev(items);
         g_unsetenv("FFCONV_TEST_STREAMS");
         g_timeout_add(600, test_step, w);
+        return G_SOURCE_REMOVE;
+    }
+    if (ui_test_env("FFCONV_TEST_OPTIONS")) {
+        test_options_step(w);
         return G_SOURCE_REMOVE;
     }
     if (output) {
@@ -462,6 +631,7 @@ static void on_probed(GObject *src, GAsyncResult *res, gpointer data)
         return;
     }
 
+    clear_rows(w);          /* before freeing the MediaInfo the rows point into */
     mi_free(&w->mi);
     w->mi  = mi;
     w->mux = NULL;
@@ -469,6 +639,7 @@ static void on_probed(GObject *src, GAsyncResult *res, gpointer data)
     gtk_widget_set_tooltip_text(w->input_label, mi->path);
     show_summary(w);
     fill_containers(w);
+    update_mux_options_label(w);
 
     w->updating = 1;
     out = w->mux ? job_default_output(mi->path, muxer_ext(w->mux) ? w->mux->extensions : w->mux->name) : NULL;
@@ -596,6 +767,13 @@ static void start_conversion(ConvWindow *w)
 
     if (w->converting || w->nb_errors || !(job = build_job(w)))
         return;
+    if (ui_test_env("FFCONV_TEST_JOB_JSON")) {   /* what the widgets produced */
+        AVBPrint bp;
+        av_bprint_init(&bp, 0, AV_BPRINT_SIZE_UNLIMITED);
+        job_to_json(job, &bp);
+        g_file_set_contents(ui_test_env("FFCONV_TEST_JOB_JSON"), bp.str, bp.len, NULL);
+        av_bprint_finalize(&bp, NULL);
+    }
     w->converting = 1;
     update_convert_button(w);
     w->progress_win = progress_start(w->win, job, w->caps, on_progress_finished, w);
@@ -647,6 +825,8 @@ static void on_destroy(GtkWidget *widget, gpointer data)
         stream_row_free(w->rows[i]);
     g_free(w->rows);
     g_free(w->containers);
+    g_hash_table_unref(w->mux_options);
+    g_strfreev(w->test_options);
     mi_free(&w->mi);
     g_free(w);
 }
@@ -662,6 +842,7 @@ ConvWindow *conv_window_new(GtkApplication *app, const Caps *caps)
 
     w->app  = app;
     w->caps = caps;
+    w->mux_options = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, opt_box_free);
     w->win  = GTK_WINDOW(gtk_application_window_new(app));
     gtk_window_set_title(w->win, "ffConv");
     gtk_window_set_default_size(w->win, 900, 640);
@@ -729,7 +910,10 @@ ConvWindow *conv_window_new(GtkApplication *app, const Caps *caps)
     gtk_widget_set_hexpand(w->container_dd, TRUE);
     gtk_widget_set_tooltip_text(w->container_dd, "Containers that can hold this file's streams, "
                                 "most common first (type to search)");
-    gtk_grid_attach(GTK_GRID(grid), w->container_dd, 1, 0, 2, 1);
+    gtk_grid_attach(GTK_GRID(grid), w->container_dd, 1, 0, 1, 1);
+    w->mux_options_btn = gtk_button_new_with_label("Options");
+    gtk_widget_set_tooltip_text(w->mux_options_btn, "Container (muxer) options");
+    gtk_grid_attach(GTK_GRID(grid), w->mux_options_btn, 2, 0, 1, 1);
 
     label = gtk_label_new("File");
     gtk_label_set_xalign(GTK_LABEL(label), 0);
@@ -765,6 +949,7 @@ ConvWindow *conv_window_new(GtkApplication *app, const Caps *caps)
     g_signal_connect(open_btn, "clicked", G_CALLBACK(on_open_clicked), w);
     g_signal_connect(browse, "clicked", G_CALLBACK(on_browse_clicked), w);
     g_signal_connect(w->container_dd, "notify::selected", G_CALLBACK(on_container_changed), w);
+    g_signal_connect(w->mux_options_btn, "clicked", G_CALLBACK(on_mux_options_clicked), w);
     g_signal_connect(w->output_entry, "changed", G_CALLBACK(on_output_changed), w);
     g_signal_connect(w->overwrite_check, "toggled", G_CALLBACK(on_overwrite_toggled), w);
     g_signal_connect(w->convert_btn, "clicked", G_CALLBACK(on_convert_clicked), w);

@@ -1,0 +1,1 @@
+{ "_expect": "encoder libx264: invalid value .abc. for .g.", "input": "tests/media/m3_in.mkv", "output": "build/v.mp4", "overwrite": true, "streams": [ { "input": 0, "action": "transcode", "encoder": "libx264", "options": { "g": "abc", "profile": "main", "b": "2M" } } ] }

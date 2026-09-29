@@ -219,6 +219,39 @@ static void option_suggest(const ClassSet *set, Suggest *s)
 }
 
 /* Check option names; values are checked by the dry run / filter parse. */
+/* Check option values by setting them on a scratch context, on the object
+ * FFmpeg would give each one to: avcodec_open2() applies private options
+ * first, avformat_write_header() generic ones first. Unknown names are
+ * skipped (check_options reports them). */
+static void check_values(V *v, int stream, const char *prefix, const char *owner,
+                         void *obj, void *priv, int priv_first, const AVDictionary *opts)
+{
+    const AVDictionaryEntry *e = NULL;
+    LogCapture cap = { .level = AV_LOG_ERROR };
+
+    if (!obj)
+        return;
+    logcap_ensure_installed();
+    while ((e = av_dict_iterate(opts, e))) {
+        int in_priv = priv && av_opt_find(priv, e->key, NULL, 0, AV_OPT_SEARCH_CHILDREN);
+        int in_gen  = av_opt_find(obj, e->key, NULL, 0, 0) != NULL;
+        void *target = in_priv && (priv_first || !in_gen) ? priv : in_gen ? obj : NULL;
+        char field[64];
+        int ret;
+
+        if (!target)
+            continue;
+        logcap_begin(&cap);
+        ret = av_opt_set(target, e->key, e->value, target == priv ? AV_OPT_SEARCH_CHILDREN : 0);
+        logcap_end();
+        if (ret >= 0)
+            continue;
+        snprintf(field, sizeof(field), "%s.%s", prefix, e->key);
+        add(v, VAL_ERROR, stream, field, "%s: invalid value '%s' for '%s': %s%s%s%s", owner, e->value,
+            e->key, av_err2str(ret), cap.first[0] ? " (" : "", cap.first, cap.first[0] ? ")" : "");
+    }
+}
+
 static void check_options(V *v, int stream, const char *prefix, const char *owner,
                           const ClassSet *set, const AVDictionary *opts)
 {
@@ -307,6 +340,13 @@ static void check_muxer(V *v)
     classes_add(&set, avformat_get_class(), 0);
     snprintf(owner, sizeof(owner), "muxer %s", v->mux->key);
     check_options(v, -1, "muxer_options", owner, &set, job->muxer_options);
+    if (av_dict_count(job->muxer_options)) {
+        AVFormatContext *fc = NULL;
+        if (avformat_alloc_output_context2(&fc, v->mux->fmt, NULL, NULL) >= 0) {
+            check_values(v, -1, "muxer_options", owner, fc, fc->priv_data, 0, job->muxer_options);
+            avformat_free_context(fc);
+        }
+    }
 }
 
 static void check_paths(V *v)
@@ -561,6 +601,12 @@ static void check_stream(V *v, int si)
         classes_add(&set, avcodec_get_class(), 0);
         snprintf(owner, sizeof(owner), "encoder %s", enc->name);
         check_options(v, si, "options", owner, &set, js->encoder_options);
+        if (av_dict_count(js->encoder_options)) {
+            AVCodecContext *cc = avcodec_alloc_context3(enc->codec);
+            if (cc)
+                check_values(v, si, "options", owner, cc, cc->priv_data, 1, js->encoder_options);
+            avcodec_free_context(&cc);
+        }
     }
     if (ms->type != AVMEDIA_TYPE_SUBTITLE)
         check_filters(v, si, js, ms->type);

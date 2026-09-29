@@ -15,6 +15,8 @@ struct StreamRow {
     JobAction           actions[3];      /* dropdown position -> action */
     int                 nb_actions;
     const CapsEncoder **encoders;        /* dropdown position -> encoder */
+    GtkWidget          *options_btn;
+    GHashTable         *options;         /* encoder name -> OptBox (only what the user set) */
     int                 nb_encoders;
     StreamRowChanged    changed;
     void               *user;
@@ -88,11 +90,111 @@ static const char *action_label(JobAction a)
     }
 }
 
-static void on_action_changed(GObject *obj, GParamSpec *pspec, gpointer data)
+/* ------------------------------------------------------------------------- */
+/* encoder options, kept per encoder so switching back restores them         */
+
+typedef struct OptBox {
+    AVDictionary *dict;
+} OptBox;
+
+static void opt_box_free(gpointer data)
+{
+    OptBox *b = data;
+
+    av_dict_free(&b->dict);
+    g_free(b);
+}
+
+static const CapsEncoder *current_encoder(const StreamRow *row)
+{
+    guint i;
+
+    if (stream_row_action(row) != JOB_TRANSCODE)
+        return NULL;
+    i = gtk_drop_down_get_selected(GTK_DROP_DOWN(row->encoder_dd));
+    return i < (guint)row->nb_encoders ? row->encoders[i] : NULL;
+}
+
+static OptBox *current_box(StreamRow *row, gboolean create)
+{
+    const CapsEncoder *enc = current_encoder(row);
+    OptBox *b;
+
+    if (!enc)
+        return NULL;
+    if (!(b = g_hash_table_lookup(row->options, enc->name)) && create) {
+        b = g_new0(OptBox, 1);
+        g_hash_table_insert(row->options, g_strdup(enc->name), b);
+    }
+    return b;
+}
+
+static void update_options_label(StreamRow *row)
+{
+    OptBox *b = current_box(row, FALSE);
+    int n = b ? av_dict_count(b->dict) : 0;
+    char label[32];
+
+    if (n)
+        g_snprintf(label, sizeof(label), "Options (%d)", n);
+    else
+        g_strlcpy(label, "Options", sizeof(label));
+    gtk_button_set_label(GTK_BUTTON(row->options_btn), label);
+}
+
+static void on_options_edited(void *data)
 {
     StreamRow *row = data;
 
-    gtk_widget_set_visible(row->encoder_dd, stream_row_action(row) == JOB_TRANSCODE);
+    update_options_label(row);
+    if (row->changed)
+        row->changed(row->user);
+}
+
+GtkWindow *stream_row_edit_options(StreamRow *row, OptionEditor **editor)
+{
+    const CapsEncoder *enc = current_encoder(row);
+    OptBox *b = current_box(row, TRUE);
+    OptionTarget t = { 0 };
+    GtkRoot *root;
+
+    if (!enc || !b)
+        return NULL;
+    root = gtk_widget_get_root(row->box);
+    t.codec = enc->codec;
+    return option_dialog_show(GTK_IS_WINDOW(root) ? GTK_WINDOW(root) : NULL, t, &b->dict,
+                              on_options_edited, row, editor);
+}
+
+static void on_options_clicked(GtkButton *b, gpointer data)
+{
+    stream_row_edit_options(data, NULL);
+}
+
+const AVDictionary *stream_row_options(const StreamRow *row)
+{
+    OptBox *b = current_box((StreamRow *)row, FALSE);
+    return b ? b->dict : NULL;
+}
+
+GHashTable *stream_row_take_options(StreamRow *row)
+{
+    GHashTable *h = row->options;
+
+    row->options = NULL;
+    return h;
+}
+
+/* ------------------------------------------------------------------------- */
+
+static void on_action_changed(GObject *obj, GParamSpec *pspec, gpointer data)
+{
+    StreamRow *row = data;
+    gboolean transcode = stream_row_action(row) == JOB_TRANSCODE;
+
+    gtk_widget_set_visible(row->encoder_dd, transcode);
+    gtk_widget_set_visible(row->options_btn, transcode);
+    update_options_label(row);
     if (row->changed)
         row->changed(row->user);
 }
@@ -101,11 +203,13 @@ static void on_encoder_changed(GObject *obj, GParamSpec *pspec, gpointer data)
 {
     StreamRow *row = data;
 
+    update_options_label(row);
     if (row->changed)
         row->changed(row->user);
 }
 
 StreamRow *stream_row_new(const Caps *caps, const CapsMuxer *mux, const MediaStream *ms,
+                          GHashTable *options,
                           int prev_action, const char *prev_encoder,
                           StreamRowChanged changed, void *user)
 {
@@ -120,6 +224,8 @@ StreamRow *stream_row_new(const Caps *caps, const CapsMuxer *mux, const MediaStr
     char *desc, *markup;
 
     row->ms = ms;
+    row->options = options ? options
+                           : g_hash_table_new_full(g_str_hash, g_str_equal, g_free, opt_box_free);
 
     if (caps_stream_actions(caps, mux, ms, 0, &act) >= 0)
         def = caps_default_action(&act, &def_enc);
@@ -197,7 +303,14 @@ StreamRow *stream_row_new(const Caps *caps, const CapsMuxer *mux, const MediaStr
     gtk_widget_set_size_request(row->encoder_dd, 190, -1);
     gtk_widget_set_tooltip_text(row->encoder_dd, "Encoder (type to search)");
     gtk_box_append(GTK_BOX(row->box), row->encoder_dd);
+
+    row->options_btn = gtk_button_new_with_label("Options");
+    gtk_widget_set_tooltip_text(row->options_btn, "Encoder options");
+    g_signal_connect(row->options_btn, "clicked", G_CALLBACK(on_options_clicked), row);
+    gtk_box_append(GTK_BOX(row->box), row->options_btn);
     gtk_widget_set_visible(row->encoder_dd, stream_row_action(row) == JOB_TRANSCODE);
+    gtk_widget_set_visible(row->options_btn, stream_row_action(row) == JOB_TRANSCODE);
+    update_options_label(row);
 
     caps_stream_actions_free(&act);
 
@@ -216,6 +329,9 @@ void stream_row_free(StreamRow *row)
         return;
     g_signal_handlers_disconnect_by_data(row->action_dd, row);
     g_signal_handlers_disconnect_by_data(row->encoder_dd, row);
+    g_signal_handlers_disconnect_by_data(row->options_btn, row);
+    if (row->options)
+        g_hash_table_unref(row->options);
     g_object_unref(row->box);
     g_free(row->encoders);
     g_free(row);
