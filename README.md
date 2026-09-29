@@ -157,6 +157,23 @@ Result: 2 error(s), 1 warning(s), dry run failed - the job would fail
 * FFmpeg's own explanation is captured from its log (`logcap`) and appended
   to error messages, in validation and in `run` alike.
 
+## App icon
+
+Two arrows turning around a play triangle, on an indigo-to-teal tile.
+
+* Sources: [assets/icons/ffconv.svg](assets/icons/ffconv.svg), and
+  [ffconv-small.svg](assets/icons/ffconv-small.svg) (thicker strokes, larger
+  triangle) for the 16–24 px sizes.
+* Generated, and committed: `assets/icons/png/ffconv-{16…256}.png` and
+  `assets/icons/ffconv.ico`. After editing an SVG, regenerate them from the
+  MSYS2 MINGW64 shell (needs `rsvg-convert`, from librsvg):
+  `python3 tools/make_icons.py --preview build/icon_preview.png`
+* Windows: the `.ico` is compiled into `ffconv.exe` with version info
+  (`src/ui/ffconv.rc.in`), so Explorer and shortcuts show it.
+* GTK: the SVG and PNGs are compiled into the program as a GResource
+  (`src/ui/ffconv.gresource.xml`); every window uses the icon named after the
+  application id, `io.github.ffconv.FFConv`.
+
 ## User interface (M5)
 
 * **Input**: *Open…* or drop a file on the window. It is probed on a worker

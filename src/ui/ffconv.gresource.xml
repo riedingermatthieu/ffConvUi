@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Resources compiled into ffconv. GtkApplication adds <base path>/icons
+     to the icon theme, so the app icon is found by its application id. -->
+<gresources>
+  <gresource prefix="/io/github/ffconv/FFConv">
+    <file alias="icons/scalable/apps/io.github.ffconv.FFConv.svg">assets/icons/ffconv.svg</file>
+    <file alias="icons/16x16/apps/io.github.ffconv.FFConv.png">assets/icons/png/ffconv-16.png</file>
+    <file alias="icons/24x24/apps/io.github.ffconv.FFConv.png">assets/icons/png/ffconv-24.png</file>
+    <file alias="icons/32x32/apps/io.github.ffconv.FFConv.png">assets/icons/png/ffconv-32.png</file>
+    <file alias="icons/48x48/apps/io.github.ffconv.FFConv.png">assets/icons/png/ffconv-48.png</file>
+    <file alias="icons/256x256/apps/io.github.ffconv.FFConv.png">assets/icons/png/ffconv-256.png</file>
+  </gresource>
+</gresources>

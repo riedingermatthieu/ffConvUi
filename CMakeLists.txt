@@ -61,6 +61,31 @@ if(GTK4_FOUND)
         src/ui/ui_util.c)
     target_link_libraries(ffconv PRIVATE convcore PkgConfig::GTK4)
     target_compile_options(ffconv PRIVATE ${CONV_WARNINGS})
+
+    # App icon for GTK windows: compiled into the program as a GResource
+    # (regenerate the icon files with tools/make_icons.py)
+    find_program(GLIB_COMPILE_RESOURCES glib-compile-resources REQUIRED)
+    set(CONV_GRESOURCE_XML ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/ffconv.gresource.xml)
+    set(CONV_GRESOURCE_C   ${CMAKE_CURRENT_BINARY_DIR}/ffconv-resources.c)
+    execute_process(COMMAND ${GLIB_COMPILE_RESOURCES} --generate-dependencies
+                            --sourcedir=${CMAKE_CURRENT_SOURCE_DIR} ${CONV_GRESOURCE_XML}
+                    OUTPUT_VARIABLE CONV_GRESOURCE_DEPS OUTPUT_STRIP_TRAILING_WHITESPACE)
+    string(REPLACE "\n" ";" CONV_GRESOURCE_DEPS "${CONV_GRESOURCE_DEPS}")
+    add_custom_command(OUTPUT ${CONV_GRESOURCE_C}
+        COMMAND ${GLIB_COMPILE_RESOURCES} --generate-source --target=${CONV_GRESOURCE_C}
+                --sourcedir=${CMAKE_CURRENT_SOURCE_DIR} ${CONV_GRESOURCE_XML}
+        DEPENDS ${CONV_GRESOURCE_XML} ${CONV_GRESOURCE_DEPS}
+        COMMENT "Compiling UI resources")
+    target_sources(ffconv PRIVATE ${CONV_GRESOURCE_C})
+
+    # Windows: icon shown by Explorer, shortcuts and the taskbar, and version info
+    if(WIN32)
+        enable_language(RC)
+        set(CONV_ICO ${CMAKE_CURRENT_SOURCE_DIR}/assets/icons/ffconv.ico)
+        configure_file(src/ui/ffconv.rc.in ${CMAKE_CURRENT_BINARY_DIR}/ffconv.rc @ONLY)
+        target_sources(ffconv PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/ffconv.rc)
+        set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/ffconv.rc PROPERTIES OBJECT_DEPENDS ${CONV_ICO})
+    endif()
 else()
     message(STATUS "gtk4 >= 4.12 not found: the ffconv UI will not be built")
 endif()

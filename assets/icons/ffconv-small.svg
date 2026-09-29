@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ffconv icon, variant for 16-24 px: same design as ffconv.svg with a
+     full-bleed tile, thicker strokes and a larger triangle so it stays
+     legible at small sizes. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4b3bd6"/>
+      <stop offset="1" stop-color="#0aa3a0"/>
+    </linearGradient>
+    <marker id="head" viewBox="0 0 10 10" refX="3" refY="5"
+            markerWidth="2.1" markerHeight="2.1" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#ffffff"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="256" height="256" rx="44" fill="url(#bg)"/>
+
+  <g fill="none" stroke="#ffffff" stroke-width="28" stroke-linecap="round">
+    <path d="M 44.9 105.7 A 86 86 0 0 1 202.48 85.0" marker-end="url(#head)"/>
+    <path d="M 211.1 150.3 A 86 86 0 0 1 53.52 171.0" marker-end="url(#head)"/>
+  </g>
+
+  <path d="M 102 84 L 102 172 L 176 128 z" fill="#ffffff" stroke="#ffffff"
+        stroke-width="10" stroke-linejoin="round"/>
+</svg>

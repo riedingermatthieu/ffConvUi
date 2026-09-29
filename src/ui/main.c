@@ -32,6 +32,9 @@
 #include "ui_util.h"
 #include "window.h"
 
+/* also the icon name: see src/ui/ffconv.gresource.xml */
+#define APP_ID "io.github.ffconv.FFConv"
+
 static Caps *g_caps;
 
 static void on_startup(GApplication *app, gpointer data)
@@ -41,6 +44,10 @@ static void on_startup(GApplication *app, gpointer data)
     /* GTK sets the locale from the environment; FFmpeg parses option values
      * such as "23.5" with strtod(), which would expect "23,5" in French. */
     setlocale(LC_NUMERIC, "C");
+
+    /* every window (main, options, progress) gets the app icon, which
+     * GtkApplication finds in the compiled-in resources */
+    gtk_window_set_default_icon_name(APP_ID);
 
     av_log_set_level(AV_LOG_INFO);
     uilog_init();
@@ -105,7 +112,7 @@ static void on_open(GApplication *app, GFile **files, int nb, const char *hint, 
 
 int main(int argc, char **argv)
 {
-    GtkApplication *app = gtk_application_new("io.github.ffconv.FFConv",
+    GtkApplication *app = gtk_application_new(APP_ID,
                                               G_APPLICATION_HANDLES_OPEN | G_APPLICATION_NON_UNIQUE);
     int status;
 
